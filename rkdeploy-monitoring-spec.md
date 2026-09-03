@@ -28,6 +28,7 @@ Confirmed against the grammar:
 - `group_by [fields], <reducer>` supports **only `mean` and `sum`** — there is no `count` and no `max` reducer. To count sessions, zones, or links per group, enumerate the returned timeseries client-side (one series per unique field tuple); OxQL does not count server-side.
 - `group_by` requires aligned input, so precede it with `align mean_within(<dur>)` (or `align interpolate(<dur>)`).
 - Filter on a metric's value with the literal keyword **`datum`** (`filter datum > 0`), not the metric name. Filter on fields by name (`sled_id == "..."`), and on time with `timestamp > @now() - 5m`.
+- A `datum` comparison must match the metric's numeric type: integer metrics take an integer literal (`datum > 0`), floating-point metrics — temperatures, voltages, anything `f32`/`f64` — take a decimal literal (`datum >= 95.0`). An integer literal against a float metric is rejected at query time. (Confirmed live: `amd_cpu_tctl` errored on `>= 95`, ran on `>= 95.0`.)
 - Duration units: `Y M w d h m s ms`.
 
 Data shapes: gauges (`imported_underlay_prefixes`, `usable_physical_ram`, `voltage`, `amd_cpu_tctl`) read as a current value; cumulative counters (`peer_expirations`, `check`, `incomplete_check`, `failed_reads`, `sensor_error_count`, `bytes_*`) are meaningless as a raw total — align and read the slope.
@@ -133,15 +134,17 @@ oxide experimental timeseries query --query \
 ```
 oxide experimental timeseries query --query \
   'get hardware_component:amd_cpu_tctl
-   | filter timestamp > @now() - 5m && datum >= 95'
+   | filter timestamp > @now() - 5m && datum >= 95.0'
 
 oxide experimental timeseries query --query \
   'get hardware_component:sensor_error_count
-   | filter timestamp > @now() - 15m && datum > 0'
+   | filter timestamp > @now() - 15m
+   | align mean_within(5m)
+   | group_by [chassis_serial, sensor], sum'
 ```
 
 - **Window / cadence:** 5m thermals, 15m error window; evaluate every 5m.
-- **Condition:** any `amd_cpu_tctl` point at or above 95 (internal throttling; 100 is shutdown, per the metric's own doc); any climbing `sensor_error_count` or `poll_error_count`. Filtering on `datum` returns only breaching points — no reducer needed.
+- **Condition:** any `amd_cpu_tctl` point at or above `95.0` (internal throttling; `100.0` is shutdown, per the metric's own doc) — the literal must be decimal because the metric is floating-point. `sensor_error_count`/`poll_error_count` are cumulative, so a nonzero total is the rack's lifetime count, not an active fault (a live run matched 193 series that way, none of them faults); alert on the per-window increase from the aligned query above, not on `datum > 0`.
 - **Severity:** warning at Tctl 95, critical at 100 or on a rising sensor-error slope.
 - **Notes:** not in the original check set, but the cheapest high-value thing continuous collection buys, and the failure mode that dominates the field issues.
 
@@ -231,6 +234,17 @@ One check has no customer-consumable telemetry at any cadence, confirmed by the 
 - **U.2 block format (4096)** (check 8) — no customer surface exposes the block size.
 
 Both are commissioning-time correctness checks, so their absence matters most during bring-up. To survive the move off the techport, the ask is a new sled-agent/oximeter timeseries carrying per-disk SMART critical-warning fields and block format, scoped to fleet. That is the one feature request this migration depends on.
+
+## Field validation
+
+First live run on 2026-09-03 (rack `de608e01-b8e4-4d93-b972-a7dbed36dd22`, latest release). All routes reachable with a `fleet.viewer` token; the project-scoped storage check ran clean at project scope. Corrections applied from that run:
+
+- `amd_cpu_tctl` threshold must use a decimal literal (`>= 95.0`); an integer literal errored (see the numeric-typing rule under OxQL conventions).
+- `sensor_error_count` is cumulative — the initial `datum > 0` matched lifetime totals (193 series), so the query and condition now read the per-window increase instead.
+
+Observations worth a second look, not blockers:
+
+- `GET /v1/system/hardware/switches` returned 0 rows on this rack. Switch presence in this spec already routes through the wicket System Inventory, not this endpoint, so the monitors are unaffected — but if the API path is wanted for switch presence, confirm why it is empty on a running rack before relying on it.
 
 ## Sources
 

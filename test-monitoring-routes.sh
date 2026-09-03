@@ -210,14 +210,18 @@ if [[ -n "$SERIAL" ]]; then
 else
   record M-MEM-voltage fleet SKIP "no serial discovered"
 fi
-run_oxql M-THERM-tctl       fleet "get hardware_component:amd_cpu_tctl | filter timestamp > @now() - ${WINDOW} && datum >= 95"
+run_oxql M-THERM-tctl       fleet "get hardware_component:amd_cpu_tctl | filter timestamp > @now() - ${WINDOW} && datum >= 95.0"
 run_oxql M-THERM-senserr    fleet "get hardware_component:sensor_error_count | filter timestamp > @now() - 15m && datum > 0"
 run_oxql M-ZONES            fleet "get sled_data_link:bytes_sent | filter timestamp > @now() - ${WINDOW}${RF}"
 run_oxql M-SVC              fleet "get http_service:request_latency_histogram | filter timestamp > @now() - 15m"
 
-# Note: M-THERM-tctl and M-THERM-senserr filter on a fault condition (datum >= 95,
-# datum > 0). On a healthy rack they SHOULD return 0 series — reported as EMPTY,
-# which is the passing state for those two. See the legend.
+# Note: M-THERM-tctl filters on a fault condition (datum >= 95.0), so a healthy
+# rack returns 0 series (EMPTY) — that is passing. The tctl literal MUST be a
+# decimal: amd_cpu_tctl is a float metric, and OxQL rejects an integer literal
+# against a float datum. M-THERM-senserr reads a CUMULATIVE counter, so a nonzero
+# total is the rack's lifetime error count, not an active fault; OK with many
+# series here means "route reachable", not "sensors erroring now". Alert on the
+# per-window increase (see the spec), not the raw total.
 
 # ---------------------------------------------------------------------------
 # OxQL route (project-scoped)
@@ -243,7 +247,7 @@ for r in "${RESULTS[@]}"; do
 done
 
 echo
-echo "Legend: ${C_OK}OK${C_R}=data returned  ${C_WARN}EMPTY${C_R}=ran, no rows (healthy for the two M-THERM fault filters)"
+echo "Legend: ${C_OK}OK${C_R}=data returned  ${C_WARN}EMPTY${C_R}=ran, no rows (healthy for the M-THERM-tctl fault filter)"
 echo "        ${C_ERR}DENIED${C_R}=permission (check token role)  ${C_ERR}FAIL${C_R}=error (see -v)  ${C_DIM}SKIP${C_R}=not run"
 echo
 if [[ $FAILED -ne 0 ]]; then
