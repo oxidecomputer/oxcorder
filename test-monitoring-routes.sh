@@ -250,6 +250,46 @@ show_zones() {
   if [[ -n "$rendered" ]]; then echo "$rendered"; else echo "  ${C_WARN}no zone telemetry in the window${C_R}"; fi
 }
 
+# show_storage — per-sled zpool capacity from zfs_pool (fleet-scoped). Disk IO
+# has no sled-scoped series (virtual_disk is project-scoped and carries no
+# sled_id), so capacity is the sled-wide storage signal that exists. Rows are
+# sorted by percent-used, so the fullest sled is on top.
+show_storage() {
+  [[ $DRYRUN -eq 1 ]] && return
+  echo
+  echo "Storage per sled  ${C_DIM}(zfs_pool capacity, last ${WINDOW}; disk IO is not available sled-wide — see spec)${C_R}"
+  local rf=""; [[ -n "$RACK" ]] && rf=" && rack_id == \"$RACK\""
+  local a="$TMP/pool_alloc.out" t="$TMP/pool_total.out"
+  if ! oxide experimental system timeseries query \
+         --query "get zfs_pool:bytes_allocated | filter timestamp > @now() - ${WINDOW}${rf}" \
+         >"$a" 2>"$TMP/pool_a.err"; then
+    echo "  ${C_ERR}zfs_pool query failed:${C_R} $(head -1 "$TMP/pool_a.err")"; return
+  fi
+  oxide experimental system timeseries query \
+    --query "get zfs_pool:bytes_total | filter timestamp > @now() - ${WINDOW}${rf}" \
+    >"$t" 2>/dev/null
+  if [[ "$(jq -r '[.tables[].timeseries[]]|length' "$a" 2>/dev/null)" == "0" ]]; then
+    echo "  ${C_WARN}no zfs_pool telemetry in the window (widen with -w)${C_R}"; return
+  fi
+  { printf 'SERIAL\tPOOLS\tUSED_TiB\tTOTAL_TiB\tPCT\n'
+    jq -rn --slurpfile A "$a" --slurpfile T "$t" '
+      def rows($x): [ $x[0].tables[].timeseries[]
+        | { pid: .fields.pool_id.value,
+            ser: (.fields.sled_serial.value // "?"),
+            v: (.points.values[0].values.values | map(select(. != null)) | (if length>0 then .[-1] else 0 end)) } ];
+      (rows($T) | map({(.pid): .v}) | add) as $tot
+      | [ rows($A) | group_by(.ser)[]
+          | { ser: .[0].ser, pools: length,
+              a: ([.[].v]|add), t: ([.[] | ($tot[.pid] // 0)]|add) }
+          | . + { pct: (if .t>0 then (.a/.t*100) else -1 end) } ]
+      | sort_by(-.pct)[]
+      | [ .ser, (.pools|tostring),
+          ((.a/1099511627776*100|round)/100|tostring),
+          ((.t/1099511627776*100|round)/100|tostring),
+          (if .pct>=0 then (.pct|round|tostring) else "?" end) ] | @tsv
+    ' ; } | { column -t -s "$(printf '\t')" 2>/dev/null || cat; } | sed 's/^/  /'
+}
+
 # ---------------------------------------------------------------------------
 # Discovery
 # ---------------------------------------------------------------------------
@@ -317,6 +357,8 @@ run_oxql M-THERM-tctl       fleet "get hardware_component:amd_cpu_tctl | filter 
 run_oxql M-THERM-senserr    fleet "get hardware_component:sensor_error_count | filter timestamp > @now() - 15m && datum > 0"
 run_oxql M-ZONES            fleet "get sled_data_link:bytes_sent | filter timestamp > @now() - ${WINDOW}${RF}"
 run_oxql M-SVC              fleet "get http_service:request_latency_histogram | filter timestamp > @now() - 15m"
+run_oxql M-POOL             fleet "get zfs_pool:bytes_total | filter timestamp > @now() - ${WINDOW}"
+run_oxql M-DATASET          fleet "get zfs_dataset:bytes_used | filter timestamp > @now() - ${WINDOW}"
 
 # Note: M-THERM-tctl filters on a fault condition (datum >= 95.0), so a healthy
 # rack returns 0 series (EMPTY) — that is passing. The tctl literal MUST be a
@@ -352,6 +394,7 @@ done
 echo
 show_sleds
 show_zones
+show_storage
 
 echo "Legend: ${C_OK}OK${C_R}=data returned  ${C_WARN}EMPTY${C_R}=ran, no rows (healthy for the M-THERM-tctl fault filter)"
 echo "        ${C_ERR}DENIED${C_R}=permission (check token role)  ${C_ERR}FAIL${C_R}=error (see -v)  ${C_DIM}SKIP${C_R}=not run"

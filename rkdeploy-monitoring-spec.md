@@ -14,7 +14,7 @@ The design assumption is continuous collection. A synchronous SSH check answers 
 
 Two tiers, taken from the authz code, not inferred.
 
-**Fleet read — minimum built-in role `fleet.viewer`.** Every monitor except M-STORAGE-IO needs this. `system_timeseries_query` authorizes `Action::Read` on `authz::FLEET` (`nexus/src/app/metrics.rs:138`), and the five fleet timeseries (`ddm_session`, `hardware_component`, `sled_data_link`, `http_service`, `virtual_machine`) are all `authz_scope = "fleet"`. The `/v1/system/hardware/*` endpoints sit on the same footing. Per `omicron/docs/debugging-authz.adoc`, the `viewer` role grants `read`, and `fleet.viewer` is "can read most resources in the system." A read-only fleet token suffices — no admin or collaborator.
+**Fleet read — minimum built-in role `fleet.viewer`.** Every monitor except M-STORAGE-IO needs this. `system_timeseries_query` authorizes `Action::Read` on `authz::FLEET` (`nexus/src/app/metrics.rs:138`), and the fleet timeseries (`ddm_session`, `hardware_component`, `sled_data_link`, `http_service`, `virtual_machine`, `zfs_pool`, `zfs_dataset`) are all `authz_scope = "fleet"`. The `/v1/system/hardware/*` endpoints sit on the same footing. Per `omicron/docs/debugging-authz.adoc`, the `viewer` role grants `read`, and `fleet.viewer` is "can read most resources in the system." A read-only fleet token suffices — no admin or collaborator.
 
 **Project read — role `viewer` on a project.** Only M-STORAGE-IO (`virtual_disk`, `authz_scope = "project"`) runs at project scope, through the project-scoped query path (`metrics.rs:146`; the `--project` form). Project viewer is enough.
 
@@ -175,6 +175,20 @@ oxide experimental timeseries query --project=<project> --query \
 - **Severity:** warning on first non-zero, critical on a sustained climb.
 - **Notes:** downstream symptom, not `zpool status` — catches a pool hurting guests, not one degraded but still serving. Pair with M-DISK-PRESENT. This is the only monitor that runs without fleet privileges.
 
+#### M-POOL-CAP — Per-sled zpool capacity (new; the sled-wide storage signal that exists)
+
+```
+oxide experimental system timeseries query --query \
+  'get zfs_pool:bytes_allocated
+   | filter timestamp > @now() - 5m && rack_id == "<rack-uuid>"'
+# pair with zfs_pool:bytes_total, joined on pool_id, to get percent-used
+```
+
+- **Window / cadence:** 5m window, evaluate every 5m (capacity moves slowly).
+- **Condition:** join `bytes_allocated` and `bytes_total` by `pool_id`, aggregate per `sled_serial`, and alert when a sled's percent-used crosses a threshold or when one sled diverges from the rack. `zfs_dataset:bytes_used` gives the same at dataset granularity.
+- **Severity:** warning at 80% used, critical at 90%.
+- **Notes:** fleet-scoped and keyed by `sled_id`/`sled_serial`, so this is a genuine per-sled view. **Disk IO, by contrast, has no sled-wide series.** The only IO metrics live on `virtual_disk` (`reads`, `writes`, `io_latency`, `io_size`, ...), which is `authz_scope = "project"` and carries `disk_id`, `attached_instance_id`, `project_id`, and `silo_id` but **no `sled_id`**. A `fleet.viewer` token can still query `virtual_disk` across every project (the fleet query path injects no project filter — `insert_authz_filters` returns the query unchanged for `Fleet`), but it can never attribute IO to a physical sled; and because Crucible replicates each disk's regions across three sleds, guest IO would not map to one sled's physical IO even if it were tagged. Physical NVMe IO is not exported to oximeter at all. So for storage, capacity is per-sled (here) and IO is project/virtual-disk-only.
+
 ### Group E — Services and zones
 
 #### M-ZONES — Zone roster by telemetry presence (trend proxy for checks 5, 12)
@@ -221,6 +235,7 @@ Checks 1 (`rss_time`) and 2 (`rss_state`) are one-shot commissioning values. The
 | M-THERM | (new) | `hardware_component` | fleet | 5m/15m | 5m | Tctl ≥ 95/100, sensor errors rising | warn/crit |
 | M-DISK-PRESENT | disks (presence) | `physical_disk_list` | fleet | — | 5m | count low or disk not active | crit |
 | M-STORAGE-IO | zpools | `virtual_disk:failed_*` | project | 1h | 5m | failed I/O climbing | warn/crit |
+| M-POOL-CAP | (new) | `zfs_pool` (+ `zfs_dataset`) | fleet | 5m | 5m | pool percent-used high, or a sled diverges | warn/crit |
 | M-ZONES | zones | `sled_data_link` | fleet | 5m | 5m | expected zone not emitting | crit |
 | M-SVC | services | `http_service` | fleet | 15m | 5m | service silent or latency shift | warn/crit |
 
