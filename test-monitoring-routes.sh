@@ -55,6 +55,9 @@ WINDOW="5m"
 VERBOSE=0
 DRYRUN=0
 MODE="full"   # full | short | coverage
+# Voltage rails that are legitimately unpopulated (read ~0 V) and must not be
+# flagged as dropped. JSON array of exact sensor names; extend as needed.
+VOLT_IGNORE='["V12_MCIO_A0HP"]'
 
 usage() { awk 'NR>1 && /^#/ {sub(/^# ?/,""); print; next} NR>1 {exit}' "$0"; exit "${1:-0}"; }
 
@@ -402,7 +405,7 @@ EOF
 show_voltage() {
   [[ $DRYRUN -eq 1 ]] && return
   echo
-  echo "Voltage anomaly scan  ${C_DIM}(rack-wide hardware_component:voltage, last ${WINDOW}; flags rails < 0.5 V)${C_R}"
+  echo "Voltage anomaly scan  ${C_DIM}(rack-wide hardware_component:voltage, last ${WINDOW}; flags rails < 0.5 V; ignores ${VOLT_IGNORE})${C_R}"
   local out="$TMP/M-MEM-voltage.out"
   if [[ ! -s "$out" ]] || [[ "$(jq -r '[.tables[].timeseries[]]|length' "$out" 2>/dev/null)" == "0" ]]; then
     echo "  ${C_WARN}no voltage telemetry captured (M-MEM-voltage was EMPTY or failed)${C_R}"; return
@@ -410,13 +413,13 @@ show_voltage() {
   local total sleds bad
   total=$(jq -r '[.tables[].timeseries[]]|length' "$out" 2>/dev/null)
   sleds=$(jq -r '[.tables[].timeseries[].fields.chassis_serial.value]|unique|length' "$out" 2>/dev/null)
-  bad="$(jq -rn --slurpfile V "$out" '
+  bad="$(jq -rn --slurpfile V "$out" --argjson ignore "$VOLT_IGNORE" '
     $V[0].tables[].timeseries[]
     | { ser: (.fields.chassis_serial.value // "?"),
         kind: (.fields.chassis_kind.value // "?"),
         sensor: (.fields.sensor.value // "?"),
         v: (.points.values[0].values.values | map(select(.!=null)) | (if length>0 then .[-1] else null end)) }
-    | select(.v != null and .v < 0.5)
+    | select(.v != null and .v < 0.5 and (.sensor as $s | ($ignore | index($s)) | not))
     | "\(.ser)\t\(.kind)\t\(.sensor)\t\(.v) V"
   ' 2>/dev/null)"
   if [[ -z "$bad" ]]; then
@@ -445,8 +448,9 @@ print_summary() {
 voltage_bad_count() {
   local out="$TMP/M-MEM-voltage.out"
   [[ -s "$out" ]] || { echo 0; return; }
-  jq -rn --slurpfile V "$out" '
+  jq -rn --slurpfile V "$out" --argjson ignore "$VOLT_IGNORE" '
     [ $V[0].tables[].timeseries[]
+      | select((.fields.sensor.value // "") as $s | ($ignore | index($s)) | not)
       | (.points.values[0].values.values | map(select(.!=null)) | (if length>0 then .[-1] else null end)) ]
     | map(select(. != null and . < 0.5)) | length
   ' 2>/dev/null || echo 0
