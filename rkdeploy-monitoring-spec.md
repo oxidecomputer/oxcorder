@@ -16,7 +16,7 @@ Two tiers, taken from the authz code, not inferred.
 
 **Fleet read — minimum built-in role `fleet.viewer`.** Every monitor except M-STORAGE-IO needs this. `system_timeseries_query` authorizes `Action::Read` on `authz::FLEET` (`nexus/src/app/metrics.rs:138`), and the fleet timeseries (`ddm_session`, `hardware_component`, `sled_data_link`, `http_service`, `virtual_machine`, `zfs_pool`, `zfs_dataset`) are all `authz_scope = "fleet"`. The `/v1/system/hardware/*` endpoints sit on the same footing. Per `omicron/docs/debugging-authz.adoc`, the `viewer` role grants `read`, and `fleet.viewer` is "can read most resources in the system." A read-only fleet token suffices — no admin or collaborator.
 
-**Project read — role `viewer` on a project.** Only M-STORAGE-IO (`virtual_disk`, `authz_scope = "project"`) runs at project scope, through the project-scoped query path (`metrics.rs:146`; the `--project` form). Project viewer is enough.
+**All routes are fleet-scoped.** Even M-STORAGE-IO, whose `virtual_disk` series carries `authz_scope = "project"`, is queried through the fleet `system_timeseries_query` endpoint, which injects no project filter (`insert_authz_filters` returns the query unchanged for `Fleet`) — so it runs with `fleet.viewer` and covers every silo's disks rack-wide. (A project viewer could instead read only their own project via the `--project` path, but the harness does not.)
 
 Caveats: `metrics.rs` carries an explicit `TODO-security` — fleet timeseries have no finer-grained scoping yet, so `fleet.viewer` is all-or-nothing (it reads every silo's metrics; a token cannot be scoped to one rack's sleds). Wicket (checks 1, 2, 6) is a separate access path: physical technician-port plus SSH to the switch, not silo RBAC.
 
@@ -164,8 +164,7 @@ oxide api /v1/system/hardware/sleds/{sled_id}/disks   # sled_physical_disk_list
 #### M-STORAGE-IO — Storage I/O failures (trend proxy for check 9, `zpool status -x`)
 
 ```
-# Project-scoped: needs only project viewer, not fleet
-oxide experimental timeseries query --project=<project> --query \
+oxide experimental system timeseries query --query \
   'get virtual_disk:failed_reads
    | filter timestamp > @now() - 1h && datum > 0'
 ```
@@ -173,7 +172,7 @@ oxide experimental timeseries query --project=<project> --query \
 - **Window / cadence:** 1h window, evaluate every 5m. Run the same against `virtual_disk:failed_writes`.
 - **Condition:** any disk with non-zero, climbing failed I/O; sustained zero is the healthy baseline.
 - **Severity:** warning on first non-zero, critical on a sustained climb.
-- **Notes:** downstream symptom, not `zpool status` — catches a pool hurting guests, not one degraded but still serving. Pair with M-DISK-PRESENT. This is the only monitor that runs without fleet privileges.
+- **Notes:** downstream symptom, not `zpool status` — catches a pool hurting guests, not one degraded but still serving. Pair with M-DISK-PRESENT. Runs fleet-wide via the system timeseries endpoint (no project filter injected), so it covers every silo's disks with `fleet.viewer`.
 
 #### M-POOL-CAP — Per-sled zpool capacity (new; the sled-wide storage signal that exists)
 
@@ -235,7 +234,7 @@ Checks 1 (`rss_time`) and 2 (`rss_state`) are one-shot commissioning values. The
 | M-MEM | memory | `usable_physical_ram` + `hardware_component` | fleet | 1d/5m | 5m | RAM ≠ expected, or DIMM rail ~0 V | crit |
 | M-THERM | (new) | `hardware_component` | fleet | 5m/15m | 5m | Tctl ≥ 95/100, sensor errors rising | warn/crit |
 | M-DISK-PRESENT | disks (presence) | `physical_disk_list` | fleet | — | 5m | count low or disk not active | crit |
-| M-STORAGE-IO | zpools | `virtual_disk:failed_*` | project | 1h | 5m | failed I/O climbing | warn/crit |
+| M-STORAGE-IO | zpools | `virtual_disk:failed_*` | fleet | 1h | 5m | failed I/O climbing | warn/crit |
 | M-POOL-CAP | (new) | `zfs_pool` (+ `zfs_dataset`) | fleet | 5m | 5m | pool percent-used high, or a sled diverges | warn/crit |
 | M-ZONES | zones | `sled_data_link` | fleet | 5m | 5m | expected zone not emitting | crit |
 | M-SVC | services | `http_service` | fleet | 15m | 5m | service silent or latency shift | warn/crit |

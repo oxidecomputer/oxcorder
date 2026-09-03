@@ -18,7 +18,7 @@ moving health checks onto structured, continuously-collected data.
 ## Usage
 
 ```
-./test-monitoring-routes.sh          # full report (auto-discover rack, sled, project)
+./test-monitoring-routes.sh          # full report (auto-discover rack and sled)
 ./test-monitoring-routes.sh -s       # short: summary + anomalies only, non-zero exit on an issue
 ./test-monitoring-routes.sh -c       # coverage only: rkdeploy-check map + per-check run result
 ./test-monitoring-routes.sh -n       # dry run: print commands, run nothing
@@ -29,7 +29,7 @@ moving health checks onto structured, continuously-collected data.
 ## Permissions
 
 - Fleet-scoped routes (all but one): minimum role `fleet.viewer`.
-- Project-scoped route (`virtual_disk` storage-I/O): `viewer` on a project.
+- Storage-I/O (`virtual_disk`) is queried fleet-wide via the system endpoint, so it needs only `fleet.viewer` and covers every silo.
 - Wicket checks (rack setup, presence): technician-port + SSH, not silo RBAC.
 
 ## Status

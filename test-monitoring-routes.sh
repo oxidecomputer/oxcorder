@@ -19,16 +19,13 @@
 #   - oxide CLI, authenticated (`oxide auth login`); check with `oxide auth status`
 #   - jq
 #
-# Permissions (see spec): all routes except the storage-I/O check need a
-# fleet-scoped token (minimum role fleet.viewer). The storage-I/O check is
-# project-scoped and needs only project viewer.
+# Permissions (see spec): every route needs a fleet-scoped token (minimum role
+# fleet.viewer). All timeseries are queried fleet-wide, across every silo.
 #
 # Usage:
-#   ./test-monitoring-routes.sh [-r RACK_UUID] [-p PROJECT] [-w WINDOW] [-v] [-n]
+#   ./test-monitoring-routes.sh [-r RACK_UUID] [-w WINDOW] [-s|-c] [-v] [-n]
 #
 #   -r RACK_UUID   Rack to scope rack-wide queries to. Auto-discovered if omitted.
-#   -p PROJECT     Project for the project-scoped storage-I/O check.
-#                  Auto-discovered if omitted; that check is skipped if none.
 #   -w WINDOW      OxQL lookback window (default 5m). Widen on a quiet rack.
 #   -s             Short: Summary plus any anomalies only; exit non-zero on an
 #                  issue. Runs every route but suppresses the detail sections.
@@ -50,7 +47,6 @@ set -uo pipefail
 # Arguments
 # ---------------------------------------------------------------------------
 RACK=""
-PROJECT=""
 WINDOW="5m"
 VERBOSE=0
 DRYRUN=0
@@ -61,10 +57,9 @@ VOLT_IGNORE='["V12_MCIO_A0HP"]'
 
 usage() { awk 'NR>1 && /^#/ {sub(/^# ?/,""); print; next} NR>1 {exit}' "$0"; exit "${1:-0}"; }
 
-while getopts ":r:p:w:scvnh" opt; do
+while getopts ":r:w:scvnh" opt; do
   case "$opt" in
     r) RACK="$OPTARG" ;;
-    p) PROJECT="$OPTARG" ;;
     w) WINDOW="$OPTARG" ;;
     s) MODE="short" ;;
     c) MODE="coverage" ;;
@@ -146,20 +141,9 @@ run_api() {
 run_oxql() {
   local id="$1" scope="$2" q="$3"
   local -a cmd
-  if [[ "$scope" == "project" ]]; then
-    cmd=(oxide experimental timeseries query --project "$PROJECT" --query "$q")
-  else
-    cmd=(oxide experimental system timeseries query --query "$q")
-  fi
+  cmd=(oxide experimental system timeseries query --query "$q")
   if [[ $DRYRUN -eq 1 ]]; then
-    # Render copy-pasteable: single-quote the query argument.
-    local shown
-    if [[ "$scope" == "project" ]]; then
-      shown="oxide experimental timeseries query --project $PROJECT --query '$q'"
-    else
-      shown="oxide experimental system timeseries query --query '$q'"
-    fi
-    printf '  %-16s %s%s%s  %s\n' "$id" "$C_DIM" "$scope" "$C_R" "$shown"
+    printf '  %-16s %s%s%s  oxide experimental system timeseries query --query %s\n' "$id" "$C_DIM" "$scope" "$C_R" "'$q'"
     record "$id" "$scope" SKIP "dry-run"; return
   fi
   [[ $VERBOSE -eq 1 ]] && echo "${C_DIM}+ ${cmd[*]}${C_R}" >&2
@@ -464,7 +448,6 @@ if [[ $DRYRUN -eq 0 ]]; then
   [[ -z "$RACK" ]]    && RACK="$(oxide api /v1/system/hardware/racks 2>/dev/null | jq -r '.items[0].id // empty')"
   SLED="$(oxide api /v1/system/hardware/sleds 2>/dev/null | jq -r '.items[0].id // empty')"
   SERIAL="$(oxide api /v1/system/hardware/sleds 2>/dev/null | jq -r '.items[0].baseboard.serial // empty')"
-  [[ -z "$PROJECT" ]] && PROJECT="$(oxide api /v1/projects 2>/dev/null | jq -r '.items[0].name // empty')"
 fi
 
 if [[ "$MODE" == "full" ]]; then
@@ -479,8 +462,6 @@ echo "    sled     ${SERIAL:-<none>} (${SLED:-<none>})"
 echo "             ${C_DIM}one sample sled, only to confirm the two per-sled endpoints"
 echo "             respond (sled_disks, sled_instances). Disk, instance, memory,"
 echo "             zone and voltage data is gathered for EVERY sled in the sections below.${C_R}"
-echo "    project  ${PROJECT:-<none — storage-I/O check will be skipped>}"
-echo "             ${C_DIM}the project the project-scoped storage-I/O check queries.${C_R}"
 echo "    window   ${WINDOW}"
 echo "             ${C_DIM}lookback for every OxQL timeseries query (widen with -w on a quiet rack).${C_R}"
 echo
@@ -523,6 +504,7 @@ run_oxql M-ZONES            fleet "get sled_data_link:bytes_sent | filter timest
 run_oxql M-SVC              fleet "get http_service:request_latency_histogram | filter timestamp > @now() - 15m"
 run_oxql M-POOL             fleet "get zfs_pool:bytes_total | filter timestamp > @now() - ${WINDOW}"
 run_oxql M-DATASET          fleet "get zfs_dataset:bytes_used | filter timestamp > @now() - ${WINDOW}"
+run_oxql M-STORAGE-IO       fleet "get virtual_disk:failed_reads | filter timestamp > @now() - 1h && datum > 0"
 
 # Note: M-THERM-tctl filters on a fault condition (datum >= 95.0), so a healthy
 # rack returns 0 series (EMPTY) — that is passing. The tctl literal MUST be a
@@ -531,16 +513,6 @@ run_oxql M-DATASET          fleet "get zfs_dataset:bytes_used | filter timestamp
 # total is the rack's lifetime error count, not an active fault; OK with many
 # series here means "route reachable", not "sensors erroring now". Alert on the
 # per-window increase (see the spec), not the raw total.
-
-# ---------------------------------------------------------------------------
-# OxQL route (project-scoped)
-# ---------------------------------------------------------------------------
-[[ "$MODE" == "full" ]] && { echo; echo "OxQL — project scope (needs project viewer)"; }
-if [[ -n "$PROJECT" ]]; then
-  run_oxql M-STORAGE-IO     project "get virtual_disk:failed_reads | filter timestamp > @now() - 1h && datum > 0"
-else
-  record M-STORAGE-IO project SKIP "no project (pass -p)"
-fi
 
 # ---------------------------------------------------------------------------
 # Output — routes have run; RESULTS and telemetry are populated. What prints
