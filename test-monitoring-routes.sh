@@ -257,7 +257,7 @@ show_zones() {
 show_storage() {
   [[ $DRYRUN -eq 1 ]] && return
   echo
-  echo "Storage per sled  ${C_DIM}(zfs_pool capacity, last ${WINDOW}; disk IO is not available sled-wide — see spec)${C_R}"
+  echo "Storage per sled  ${C_DIM}(zfs_pool; EXT=U.2 data pools, INT=M.2 boot; USED/TOTAL are external pools; disk IO not available sled-wide — see spec)${C_R}"
   local rf=""; [[ -n "$RACK" ]] && rf=" && rack_id == \"$RACK\""
   local a="$TMP/pool_alloc.out" t="$TMP/pool_total.out"
   if ! oxide experimental system timeseries query \
@@ -271,19 +271,24 @@ show_storage() {
   if [[ "$(jq -r '[.tables[].timeseries[]]|length' "$a" 2>/dev/null)" == "0" ]]; then
     echo "  ${C_WARN}no zfs_pool telemetry in the window (widen with -w)${C_R}"; return
   fi
-  { printf 'SERIAL\tPOOLS\tUSED_TiB\tTOTAL_TiB\tPCT\n'
+  { printf 'SERIAL\tEXT_POOLS\tINT_POOLS\tUSED_TiB\tTOTAL_TiB\tPCT\n'
     jq -rn --slurpfile A "$a" --slurpfile T "$t" '
       def rows($x): [ $x[0].tables[].timeseries[]
         | { pid: .fields.pool_id.value,
             ser: (.fields.sled_serial.value // "?"),
+            name: (.fields.pool_name.value // ""),
             v: (.points.values[0].values.values | map(select(. != null)) | (if length>0 then .[-1] else 0 end)) } ];
       (rows($T) | map({(.pid): .v}) | add) as $tot
-      | [ rows($A) | group_by(.ser)[]
-          | { ser: .[0].ser, pools: length,
-              a: ([.[].v]|add), t: ([.[] | ($tot[.pid] // 0)]|add) }
+      | [ rows($A)[] | { ser, a: .v, t: ($tot[.pid] // 0), isext: (.name|startswith("oxp_")) } ]
+      | [ group_by(.ser)[]
+          | { ser: .[0].ser,
+              ext: ([.[]|select(.isext)]|length),
+              int: ([.[]|select(.isext|not)]|length),
+              a: ([.[]|select(.isext)|.a]|add // 0),
+              t: ([.[]|select(.isext)|.t]|add // 0) }
           | . + { pct: (if .t>0 then (.a/.t*100) else -1 end) } ]
       | sort_by(-.pct)[]
-      | [ .ser, (.pools|tostring),
+      | [ .ser, (.ext|tostring), (.int|tostring),
           ((.a/1099511627776*100|round)/100|tostring),
           ((.t/1099511627776*100|round)/100|tostring),
           (if .pct>=0 then (.pct|round|tostring) else "?" end) ] | @tsv
