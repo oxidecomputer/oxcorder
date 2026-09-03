@@ -2,10 +2,16 @@
 #
 # test-monitoring-routes.sh
 #
-# Validation harness for the customer-consumable routes that replace the
-# rkdeploy health check (see rkdeploy-monitoring-spec.md). It exercises every
-# external-API endpoint and OxQL query the spec depends on and reports, per
-# route, whether it is reachable, authorized, and returning data on THIS rack.
+# Validation + inventory harness for the customer-consumable routes that replace
+# the rkdeploy health check (see rkdeploy-monitoring-spec.md). It:
+#   1. exercises every external-API endpoint and OxQL query the spec depends on
+#      and reports, per route, whether it is reachable, authorized, and returning
+#      data on THIS rack (the Summary);
+#   2. prints per-sled views for spotting outliers: a per-sled inventory
+#      (threads, RAM, disks, zones, instances), zones-per-sled grouped by service
+#      type, and per-sled storage capacity (U.2 vs M.2 pools); and
+#   3. closes with a coverage table mapping each rkdeploy check-health test to the
+#      API/OxQL that satisfies it here (direct, indirect, or not possible).
 #
 # Everything here is read-only. Nothing is created, modified, or deleted.
 #
@@ -42,7 +48,7 @@ WINDOW="5m"
 VERBOSE=0
 DRYRUN=0
 
-usage() { sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { awk 'NR>1 && /^#/ {sub(/^# ?/,""); print; next} NR>1 {exit}' "$0"; exit "${1:-0}"; }
 
 while getopts ":r:p:w:vnh" opt; do
   case "$opt" in
@@ -295,6 +301,30 @@ show_storage() {
     ' ; } | { column -t -s "$(printf '\t')" 2>/dev/null || cat; } | sed 's/^/  /'
 }
 
+# show_coverage — map each rkdeploy check-health test to the API/OxQL built here.
+# Static reference (does not depend on this run's data): Direct = a metric maps
+# 1:1; Indirect = reconstructed or a downstream proxy; Not possible = no
+# customer-consumable telemetry exists.
+show_coverage() {
+  echo
+  echo "Coverage vs rkdeploy check-health  ${C_DIM}(each check -> the API/OxQL that satisfies it here)${C_R}"
+  { printf 'RKDEPLOY CHECK\tHARNESS ROUTE(S)\tCOVERAGE\n'
+    printf '%s\t%s\t%s\n' "1  rss_time"                "rack_list (time_created); wicket"  "Indirect"
+    printf '%s\t%s\t%s\n' "2  rss_state"               "ping, rack_list; wicket"           "Indirect"
+    printf '%s\t%s\t%s\n' "3  instances STATE!=INTENT" "M-INST-check, M-INST-incomplete"   "Indirect"
+    printf '%s\t%s\t%s\n' "4  ddm_peers (rack)"        "M-DDM-RACK-cov, M-DDM-RACK-flap"   "Direct"
+    printf '%s\t%s\t%s\n' "5  zones (rack)"            "M-ZONES"                           "Indirect"
+    printf '%s\t%s\t%s\n' "6  sled presence"           "sled_list, M-SLED-PRESENT"         "Direct"
+    printf '%s\t%s\t%s\n' "7  memory"                  "sled_list (RAM), M-MEM-voltage"    "Direct"
+    printf '%s\t%s\t%s\n' "8a disks: count/presence"   "sled_disks, M-POOL"                "Direct"
+    printf '%s\t%s\t%s\n' "8b disks: SMART/block-format" "(none)"                          "Not possible"
+    printf '%s\t%s\t%s\n' "9  zpools"                  "M-STORAGE-IO"                      "Indirect"
+    printf '%s\t%s\t%s\n' "10 services"                "M-SVC"                             "Indirect"
+    printf '%s\t%s\t%s\n' "11 ddm_peers (sled)"        "M-DDM-SLED"                        "Direct"
+    printf '%s\t%s\t%s\n' "12 zones (sled)"            "M-ZONES"                           "Indirect"
+  } | { column -t -s "$(printf '\t')" 2>/dev/null || cat; } | sed 's/^/  /'
+}
+
 # ---------------------------------------------------------------------------
 # Discovery
 # ---------------------------------------------------------------------------
@@ -404,6 +434,8 @@ show_storage
 echo "Legend: ${C_OK}OK${C_R}=data returned  ${C_WARN}EMPTY${C_R}=ran, no rows (healthy for the M-THERM-tctl fault filter)"
 echo "        ${C_ERR}DENIED${C_R}=permission (check token role)  ${C_ERR}FAIL${C_R}=error (see -v)  ${C_DIM}SKIP${C_R}=not run"
 echo
+show_coverage
+
 if [[ $FAILED -ne 0 ]]; then
   echo "${C_ERR}One or more routes failed or were denied.${C_R} Re-run with -v for details."
   exit 1
