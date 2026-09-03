@@ -199,12 +199,24 @@ show_zones() {
   fi
   local rendered
   rendered="$(jq -r '
+    # Reduce a full zone name to its service type: strip the oxz_ prefix and
+    # the trailing per-zone UUID. "global" and "oxz_switch" have no UUID.
+    def ztype:
+      if . == "global" then "global"
+      else ( sub("^oxz_";"") ) as $r
+        | ( $r | split("_") ) as $p
+        | if ($p[-1] | test("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"))
+          then ($p[:-1] | join("_")) else $r end
+      end;
     [ .tables[].timeseries[]
       | { s: (.fields.sled_serial.value // "unknown"),
           z: (.fields.zone_name.value   // "unknown") } ]
     | group_by(.s)[]
-    | "  \(.[0].s)  (\([.[].z]|unique|length) zones)\n    " +
-      ([.[].z] | unique | sort | join(", "))
+    | ([.[].z] | unique) as $zones
+    | (.[0].s) as $serial
+    | ( $zones | map(ztype) | group_by(.) | map({t: .[0], n: length}) | sort_by(-.n, .t) ) as $g
+    | ( "  \($serial)  (\($zones|length) zones, \($g|length) types)" ),
+      ( $g[] | "      " + (.t + "                    ")[0:20] + (.n|tostring) )
   ' "$out" 2>/dev/null)"
   if [[ -n "$rendered" ]]; then echo "$rendered"; else echo "  ${C_WARN}no zone telemetry in the window${C_R}"; fi
 }
@@ -222,10 +234,18 @@ fi
 
 echo
 echo "rkdeploy monitoring-route validation"
-echo "  rack:    ${RACK:-<none discovered>}"
-echo "  sled:    ${SLED:-<none>}  serial: ${SERIAL:-<none>}"
-echo "  project: ${PROJECT:-<none — storage-I/O check will be skipped>}"
-echo "  window:  ${WINDOW}"
+echo
+echo "  Parameters (what each one scopes):"
+echo "    rack     ${RACK:-<none discovered>}"
+echo "             ${C_DIM}rack-wide OxQL queries are filtered to this rack. The API exposes no rack"
+echo "             serial number — the UUID is the rack's only identifier.${C_R}"
+echo "    sled     ${SERIAL:-<none>} (${SLED:-<none>})"
+echo "             ${C_DIM}a sample sled, used only for the per-sled API probes below"
+echo "             (sled_disks, sled_instances, M-MEM-voltage).${C_R}"
+echo "    project  ${PROJECT:-<none — storage-I/O check will be skipped>}"
+echo "             ${C_DIM}the project the project-scoped storage-I/O check queries.${C_R}"
+echo "    window   ${WINDOW}"
+echo "             ${C_DIM}lookback for every OxQL timeseries query (widen with -w on a quiet rack).${C_R}"
 echo
 
 # ---------------------------------------------------------------------------
