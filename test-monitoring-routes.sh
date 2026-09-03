@@ -385,6 +385,38 @@ EOF
   fi
 }
 
+# show_voltage — rack-wide voltage anomaly scan. A powered chassis should have
+# no rail near zero, so any rail reading below 0.5 V is flagged as a likely
+# dropped rail (the cs-914/cs-932 DDR-bank failure mode). Reuses the
+# M-MEM-voltage query output; covers every chassis (sled, switch, power shelf).
+show_voltage() {
+  [[ $DRYRUN -eq 1 ]] && return
+  echo
+  echo "Voltage anomaly scan  ${C_DIM}(rack-wide hardware_component:voltage, last ${WINDOW}; flags rails < 0.5 V)${C_R}"
+  local out="$TMP/M-MEM-voltage.out"
+  if [[ ! -s "$out" ]] || [[ "$(jq -r '[.tables[].timeseries[]]|length' "$out" 2>/dev/null)" == "0" ]]; then
+    echo "  ${C_WARN}no voltage telemetry captured (M-MEM-voltage was EMPTY or failed)${C_R}"; return
+  fi
+  local total sleds bad
+  total=$(jq -r '[.tables[].timeseries[]]|length' "$out" 2>/dev/null)
+  sleds=$(jq -r '[.tables[].timeseries[].fields.chassis_serial.value]|unique|length' "$out" 2>/dev/null)
+  bad="$(jq -rn --slurpfile V "$out" '
+    $V[0].tables[].timeseries[]
+    | { ser: (.fields.chassis_serial.value // "?"),
+        kind: (.fields.chassis_kind.value // "?"),
+        sensor: (.fields.sensor.value // "?"),
+        v: (.points.values[0].values.values | map(select(.!=null)) | (if length>0 then .[-1] else null end)) }
+    | select(.v != null and .v < 0.5)
+    | "\(.ser)\t\(.kind)\t\(.sensor)\t\(.v) V"
+  ' 2>/dev/null)"
+  if [[ -z "$bad" ]]; then
+    printf '  %sall rails nominal%s across %s chassis (%s sensors)\n' "$C_OK" "$C_R" "${sleds:-?}" "${total:-?}"
+  else
+    { printf 'CHASSIS\tKIND\tSENSOR\tVOLTS\n'; printf '%s\n' "$bad"; } | { column -t -s "$(printf '\t')" 2>/dev/null || cat; } | sed 's/^/  /'
+    printf '  %s%s rail(s) below 0.5 V — likely dropped; investigate%s\n' "$C_ERR" "$(printf '%s\n' "$bad" | grep -c .)" "$C_R"
+  fi
+}
+
 # ---------------------------------------------------------------------------
 # Discovery
 # ---------------------------------------------------------------------------
@@ -487,6 +519,7 @@ echo
 show_sleds
 show_zones
 show_storage
+show_voltage
 
 echo "Legend: ${C_OK}OK${C_R}=data returned  ${C_WARN}EMPTY${C_R}=ran, no rows (healthy for the M-THERM-tctl fault filter)"
 echo "        ${C_ERR}DENIED${C_R}=permission (check token role)  ${C_ERR}FAIL${C_R}=error (see -v)  ${C_DIM}SKIP${C_R}=not run"
