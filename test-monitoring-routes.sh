@@ -3,15 +3,16 @@
 # test-monitoring-routes.sh
 #
 # Validation + inventory harness for the customer-consumable routes that replace
-# the rkdeploy health check (see rkdeploy-monitoring-spec.md). It:
+# the technician-port (techport) privileged-access health check (see
+# techport-monitoring-spec.md). It:
 #   1. exercises every external-API endpoint and OxQL query the spec depends on
 #      and reports, per route, whether it is reachable, authorized, and returning
 #      data on THIS rack (the Summary);
 #   2. prints per-sled views for spotting outliers: a per-sled inventory
 #      (threads, RAM, disks, zones, instances), zones-per-sled grouped by service
 #      type, and per-sled storage capacity (U.2 vs M.2 pools); and
-#   3. closes with a coverage table mapping each rkdeploy check-health test to the
-#      API/OxQL that satisfies it here (direct, indirect, or not possible).
+#   3. closes with a coverage table mapping each techport privileged-access check
+#      to the API/OxQL that satisfies it here (direct, indirect, or not possible).
 #
 # Everything here is read-only. Nothing is created, modified, or deleted.
 #
@@ -30,7 +31,7 @@
 #   -s             Short: Summary plus any anomalies only; exit non-zero on an
 #                  issue. Runs every route but suppresses the detail sections.
 #                  Meant to be called from a script.
-#   -c             Coverage: show ONLY the rkdeploy-check coverage table and the
+#   -c             Coverage: show ONLY the techport-check coverage table and the
 #                  per-check run result. Runs every route; suppresses all else.
 #                  (-s and -c are mutually exclusive; the last one given wins.)
 #   -v             Verbose: print each command and the raw error on failure.
@@ -298,14 +299,14 @@ show_storage() {
     ' ; } | { column -t -s "$(printf '\t')" 2>/dev/null || cat; } | sed 's/^/  /'
 }
 
-# show_coverage — map each rkdeploy check-health test to the API/OxQL built here.
-# Static reference (does not depend on this run's data): Direct = a metric maps
-# 1:1; Indirect = reconstructed or a downstream proxy; Not possible = no
+# show_coverage — map each techport privileged-access check to the API/OxQL built
+# here. Static reference (does not depend on this run's data): Direct = a metric
+# maps 1:1; Indirect = reconstructed or a downstream proxy; Not possible = no
 # customer-consumable telemetry exists.
 show_coverage() {
   echo
-  echo "Coverage vs rkdeploy check-health  ${C_DIM}(each check -> the API/OxQL that satisfies it here)${C_R}"
-  { printf 'RKDEPLOY CHECK\tHARNESS ROUTE(S)\tCOVERAGE\n'
+  echo "Coverage vs techport privileged-access check  ${C_DIM}(each check -> the API/OxQL that satisfies it here)${C_R}"
+  { printf 'TECHPORT CHECK\tHARNESS ROUTE(S)\tCOVERAGE\n'
     printf '%s\t%s\t%s\n' "1  rss_time"                "rack_list (time_created); wicket"  "Indirect"
     printf '%s\t%s\t%s\n' "2  rss_state"               "ping, rack_list; wicket"           "Indirect"
     printf '%s\t%s\t%s\n' "3  instances STATE!=INTENT" "M-INST-check, M-INST-incomplete"   "Indirect"
@@ -331,7 +332,7 @@ route_status() {
   printf 'MISSING'
 }
 
-# show_result — per-rkdeploy-check pass/fail for THIS run, derived from the
+# show_result — per-techport-check pass/fail for THIS run, derived from the
 # covering routes' live statuses. A check PASSES when all its routes came back
 # OK or EMPTY (reachable); a DENIED/FAIL route FAILS it; a skipped route marks
 # it SKIP; the SMART/block-format check has no route and is N/A.
@@ -452,7 +453,7 @@ fi
 
 if [[ "$MODE" == "full" ]]; then
 echo
-echo "rkdeploy monitoring-route validation"
+echo "techport monitoring-route validation"
 echo
 echo "  Parameters (what each one scopes):"
 echo "    rack     ${RACK:-<none discovered>}"

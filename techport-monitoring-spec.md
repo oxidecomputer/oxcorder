@@ -1,12 +1,12 @@
-# rkdeploy Health Check → Customer-Consumable Monitoring Spec
+# Technician-Port Health Check → Customer-Consumable Monitoring Spec
 
-*Standing monitoring spec for replacing `rkdeploy check-health` with external API, wicket, and oximeter/OxQL.*
+*Standing monitoring spec for replacing the technician-port (techport) privileged-access health check with external API, wicket, and oximeter/OxQL.*
 *Target: latest release. Wicket scope: customer TUI only. Date: 2026-09-02.*
 *OxQL validated against omicron `oximeter/db/src/oxql/ast/grammar.rs`; permissions against `nexus/src/app/metrics.rs`.*
 
 ## Purpose
 
-`rkdeploy check-health` runs entirely over the technician port: SSH into the switch zone, SSH from there into every sled's global zone, plus a few wicketd calls on the same network. This spec replaces those checks with surfaces a customer already has — the external API, the wicket TUI, and oximeter timeseries queried through the API — so the checks can run 24/7/365 as standing monitors instead of a synchronous, techport-bound sweep.
+The privileged-access health check (`check-health`) runs entirely over the technician port: SSH into the switch zone, SSH from there into every sled's global zone, plus a few wicketd calls on the same network. This spec replaces those checks with surfaces a customer already has — the external API, the wicket TUI, and oximeter timeseries queried through the API — so the checks can run 24/7/365 as standing monitors instead of a synchronous, techport-bound sweep.
 
 The design assumption is continuous collection. A synchronous SSH check answers "healthy right now." A continuously collected timeseries answers "healthy, and trending which way," and it makes one thing queryable that has no direct API: the **absence of expected telemetry**. A control-plane zone that dies stops emitting its data-link and HTTP series; the monitor detects the gap, not the `svcs` state. Oxide support already uses this technique in the field (see cs-914, where a sled hang was pinned to the timestamp `sled_data_link:bytes_received` stopped emitting).
 
@@ -219,7 +219,7 @@ oxide experimental timeseries query --query \
 
 ### Group F — Rack setup (commissioning-time, not standing)
 
-Checks 1 (`rss_time`) and 2 (`rss_state`) are one-shot commissioning values. The customer path is the wicket Rack Setup tab — the TUI surface over the same wicketd state `rkdeploy` reads today. Once initialized, external API liveness (`ping`, `rack_list` returning) confirms the same fact.
+Checks 1 (`rss_time`) and 2 (`rss_state`) are one-shot commissioning values. The customer path is the wicket Rack Setup tab — the TUI surface over the same wicketd state the privileged-access check reads today. Once initialized, external API liveness (`ping`, `rack_list` returning) confirms the same fact.
 
 ---
 
@@ -263,7 +263,7 @@ Observations worth a second look, not blockers:
 
 ## Sources
 
-- `rkdeploy/crates/rack-core/src/health.rs`, `rack.rs`, `zone.rs` — the checks being replaced.
+- `rkdeploy/crates/rack-core/src/health.rs`, `rack.rs`, `zone.rs` — the privileged-access (techport) checks being replaced (the `rkdeploy` repository is internal to Oxide; not customer-accessible).
 - `omicron/oximeter/db/src/oxql/ast/grammar.rs` — OxQL grammar (reducers `mean`/`sum` only; `align mean_within`; `filter datum`).
 - `omicron/nexus/src/app/metrics.rs` — timeseries authz (`Action::Read` on `FLEET`; project-scoped variant).
 - `omicron/docs/debugging-authz.adoc` — role model (`viewer` grants read; `fleet.viewer` reads the system).
