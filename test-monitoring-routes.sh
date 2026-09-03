@@ -156,6 +156,60 @@ run_oxql() {
 }
 
 # ---------------------------------------------------------------------------
+# Inventory display (informational; not part of pass/fail)
+# ---------------------------------------------------------------------------
+
+# show_sleds — every sled in the rack, from the external API.
+show_sleds() {
+  [[ $DRYRUN -eq 1 ]] && return
+  echo
+  echo "Sleds in rack"
+  local out="$TMP/inv_sleds.out"
+  if ! oxide api /v1/system/hardware/sleds >"$out" 2>"$TMP/inv_sleds.err"; then
+    echo "  ${C_ERR}could not list sleds:${C_R} $(head -1 "$TMP/inv_sleds.err")"
+    return
+  fi
+  { printf 'SERIAL\tSTATE\tPOLICY\tTHREADS\tRAM_GiB\tSLED_ID\n'
+    jq -r '.items | sort_by(.baseboard.serial)[]
+           | [ .baseboard.serial, .state, .policy.kind,
+               (.usable_hardware_threads|tostring),
+               ((.usable_physical_ram/1073741824)|floor|tostring),
+               .id ] | @tsv' "$out"
+  } | { column -t -s "$(printf '\t')" 2>/dev/null || cat; } | sed 's/^/  /'
+  printf '  %s%s sled(s)%s\n' "$C_DIM" "$(jq -r '.items|length' "$out")" "$C_R"
+}
+
+# show_zones — zones per sled, from sled_data_link telemetry (the M-ZONES query).
+# A zone appears only if it emitted a data link in the window; the global zone
+# shows as "global". Keyed on sled serial (the API exposes no cubby number).
+show_zones() {
+  [[ $DRYRUN -eq 1 ]] && return
+  echo
+  echo "Zones per sled  ${C_DIM}(from sled_data_link telemetry, last ${WINDOW})${C_R}"
+  local out="$TMP/M-ZONES.out"        # reuse the validation query's output if present
+  if [[ ! -s "$out" ]]; then
+    out="$TMP/inv_zones.out"
+    local rf=""; [[ -n "$RACK" ]] && rf=" && rack_id == \"$RACK\""
+    if ! oxide experimental system timeseries query \
+           --query "get sled_data_link:bytes_sent | filter timestamp > @now() - ${WINDOW}${rf}" \
+           >"$out" 2>"$TMP/inv_zones.err"; then
+      echo "  ${C_ERR}zone query failed:${C_R} $(head -1 "$TMP/inv_zones.err")"
+      return
+    fi
+  fi
+  local rendered
+  rendered="$(jq -r '
+    [ .tables[].timeseries[]
+      | { s: (.fields.sled_serial.value // "unknown"),
+          z: (.fields.zone_name.value   // "unknown") } ]
+    | group_by(.s)[]
+    | "  \(.[0].s)  (\([.[].z]|unique|length) zones)\n    " +
+      ([.[].z] | unique | sort | join(", "))
+  ' "$out" 2>/dev/null)"
+  if [[ -n "$rendered" ]]; then echo "$rendered"; else echo "  ${C_WARN}no zone telemetry in the window${C_R}"; fi
+}
+
+# ---------------------------------------------------------------------------
 # Discovery
 # ---------------------------------------------------------------------------
 SLED="" ; SERIAL=""
@@ -247,6 +301,9 @@ for r in "${RESULTS[@]}"; do
 done
 
 echo
+show_sleds
+show_zones
+
 echo "Legend: ${C_OK}OK${C_R}=data returned  ${C_WARN}EMPTY${C_R}=ran, no rows (healthy for the M-THERM-tctl fault filter)"
 echo "        ${C_ERR}DENIED${C_R}=permission (check token role)  ${C_ERR}FAIL${C_R}=error (see -v)  ${C_DIM}SKIP${C_R}=not run"
 echo
