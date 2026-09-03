@@ -325,6 +325,66 @@ show_coverage() {
   } | { column -t -s "$(printf '\t')" 2>/dev/null || cat; } | sed 's/^/  /'
 }
 
+# route_status — look up a route's live STATUS from RESULTS by id.
+route_status() {
+  local id="$1" r
+  for r in "${RESULTS[@]}"; do
+    [[ "${r%%|*}" == "$id" ]] && { printf '%s' "$r" | cut -d'|' -f3; return; }
+  done
+  printf 'MISSING'
+}
+
+# show_result — per-rkdeploy-check pass/fail for THIS run, derived from the
+# covering routes' live statuses. A check PASSES when all its routes came back
+# OK or EMPTY (reachable); a DENIED/FAIL route FAILS it; a skipped route marks
+# it SKIP; the SMART/block-format check has no route and is N/A.
+show_result() {
+  echo
+  echo "Run result by check  ${C_DIM}(did this run's routes for each check come back clean?)${C_R}"
+  local num name ids id st worst pass=0 fail=0 skip=0 na=0
+  while IFS='|' read -r num name ids; do
+    [[ -z "$num" ]] && continue
+    if [[ "$ids" == "NONE" ]]; then
+      printf '  %-3s %-28s %sN/A%s\n' "$num" "$name" "$C_DIM" "$C_R"; na=$((na+1)); continue
+    fi
+    worst="PASS"
+    for id in $ids; do
+      st="$(route_status "$id")"
+      case "$st" in
+        FAIL|DENIED) worst="FAIL"; break;;
+        SKIP|MISSING) [[ "$worst" == "PASS" ]] && worst="SKIP";;
+      esac
+    done
+    case "$worst" in
+      PASS) printf '  %-3s %-28s %sPASS%s\n' "$num" "$name" "$C_OK"  "$C_R"; pass=$((pass+1));;
+      SKIP) printf '  %-3s %-28s %sSKIP%s\n' "$num" "$name" "$C_DIM" "$C_R"; skip=$((skip+1));;
+      FAIL) printf '  %-3s %-28s %sFAIL%s\n' "$num" "$name" "$C_ERR" "$C_R"; fail=$((fail+1));;
+    esac
+  done <<'EOF'
+1|rss_time|rack_list
+2|rss_state|ping rack_list
+3|instances STATE!=INTENT|M-INST-check M-INST-incomplete sled_instances
+4|ddm_peers (rack)|M-DDM-RACK-cov M-DDM-RACK-flap
+5|zones (rack)|M-ZONES
+6|sled presence|sled_list M-SLED-PRESENT
+7|memory|sled_list M-MEM-voltage
+8a|disks: count/presence|sled_disks M-POOL
+8b|disks: SMART/block-format|NONE
+9|zpools|M-STORAGE-IO
+10|services|M-SVC
+11|ddm_peers (sled)|M-DDM-SLED
+12|zones (sled)|M-ZONES
+EOF
+  echo
+  if [[ $fail -gt 0 ]]; then
+    printf '  %sRun FAILED%s — %d failed, %d reachable, %d skipped, %d not possible.\n' "$C_ERR" "$C_R" "$fail" "$pass" "$skip" "$na"
+  elif [[ $pass -eq 0 ]]; then
+    printf '  %sNo routes executed%s (dry run?) — %d skipped, %d not possible.\n' "$C_DIM" "$C_R" "$skip" "$na"
+  else
+    printf '  %sRun PASSED%s — %d checks reachable, %d skipped, %d not possible.\n' "$C_OK" "$C_R" "$pass" "$skip" "$na"
+  fi
+}
+
 # ---------------------------------------------------------------------------
 # Discovery
 # ---------------------------------------------------------------------------
@@ -435,6 +495,7 @@ echo "Legend: ${C_OK}OK${C_R}=data returned  ${C_WARN}EMPTY${C_R}=ran, no rows (
 echo "        ${C_ERR}DENIED${C_R}=permission (check token role)  ${C_ERR}FAIL${C_R}=error (see -v)  ${C_DIM}SKIP${C_R}=not run"
 echo
 show_coverage
+show_result
 
 if [[ $FAILED -ne 0 ]]; then
   echo "${C_ERR}One or more routes failed or were denied.${C_R} Re-run with -v for details."
