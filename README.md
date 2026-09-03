@@ -18,7 +18,9 @@ moving health checks onto structured, continuously-collected data.
 ## Usage
 
 ```
-./test-monitoring-routes.sh          # auto-discover rack, sled, project
+./test-monitoring-routes.sh          # full report (auto-discover rack, sled, project)
+./test-monitoring-routes.sh -s       # short: summary + anomalies only, non-zero exit on an issue
+./test-monitoring-routes.sh -c       # coverage only: rkdeploy-check map + per-check run result
 ./test-monitoring-routes.sh -n       # dry run: print commands, run nothing
 ./test-monitoring-routes.sh -v       # verbose errors
 ./test-monitoring-routes.sh -r RACK_UUID -p PROJECT -w 30m

@@ -30,12 +30,19 @@
 #   -p PROJECT     Project for the project-scoped storage-I/O check.
 #                  Auto-discovered if omitted; that check is skipped if none.
 #   -w WINDOW      OxQL lookback window (default 5m). Widen on a quiet rack.
+#   -s             Short: Summary plus any anomalies only; exit non-zero on an
+#                  issue. Runs every route but suppresses the detail sections.
+#                  Meant to be called from a script.
+#   -c             Coverage: show ONLY the rkdeploy-check coverage table and the
+#                  per-check run result. Runs every route; suppresses all else.
+#                  (-s and -c are mutually exclusive; the last one given wins.)
 #   -v             Verbose: print each command and the raw error on failure.
 #   -n             Dry run: print the commands without executing them.
 #   -h             This help.
 #
-# Exit status: 0 if no route FAILED (EMPTY and DENIED still return non-zero
-# only for DENIED/FAIL). See the summary legend at the end of a run.
+# Exit status: 0 when every executed route is reachable and no voltage anomaly
+# was found; 1 if a route FAILED or was DENIED, or a rail read below 0.5 V.
+# This holds in every mode, so -s is safe to gate a script on.
 
 set -uo pipefail
 
@@ -47,14 +54,17 @@ PROJECT=""
 WINDOW="5m"
 VERBOSE=0
 DRYRUN=0
+MODE="full"   # full | short | coverage
 
 usage() { awk 'NR>1 && /^#/ {sub(/^# ?/,""); print; next} NR>1 {exit}' "$0"; exit "${1:-0}"; }
 
-while getopts ":r:p:w:vnh" opt; do
+while getopts ":r:p:w:scvnh" opt; do
   case "$opt" in
     r) RACK="$OPTARG" ;;
     p) PROJECT="$OPTARG" ;;
     w) WINDOW="$OPTARG" ;;
+    s) MODE="short" ;;
+    c) MODE="coverage" ;;
     v) VERBOSE=1 ;;
     n) DRYRUN=1 ;;
     h) usage 0 ;;
@@ -417,6 +427,31 @@ show_voltage() {
   fi
 }
 
+# print_summary — the per-route status table.
+print_summary() {
+  echo
+  echo "Summary"
+  printf '  %-18s %-8s %-7s %s\n' "ROUTE" "SCOPE" "STATUS" "DETAIL"
+  printf '  %-18s %-8s %-7s %s\n' "-----" "-----" "------" "------"
+  local r id scope status detail
+  for r in "${RESULTS[@]}"; do
+    IFS='|' read -r id scope status detail <<<"$r"
+    printf '  %-18s %-8s ' "$id" "$scope"; paint "$status"; printf ' %s\n' "$detail"
+  done
+}
+
+# voltage_bad_count — number of voltage rails reading below 0.5 V (dropped),
+# from the M-MEM-voltage output. Echoes 0 when there is no data.
+voltage_bad_count() {
+  local out="$TMP/M-MEM-voltage.out"
+  [[ -s "$out" ]] || { echo 0; return; }
+  jq -rn --slurpfile V "$out" '
+    [ $V[0].tables[].timeseries[]
+      | (.points.values[0].values.values | map(select(.!=null)) | (if length>0 then .[-1] else null end)) ]
+    | map(select(. != null and . < 0.5)) | length
+  ' 2>/dev/null || echo 0
+}
+
 # ---------------------------------------------------------------------------
 # Discovery
 # ---------------------------------------------------------------------------
@@ -428,6 +463,7 @@ if [[ $DRYRUN -eq 0 ]]; then
   [[ -z "$PROJECT" ]] && PROJECT="$(oxide api /v1/projects 2>/dev/null | jq -r '.items[0].name // empty')"
 fi
 
+if [[ "$MODE" == "full" ]]; then
 echo
 echo "rkdeploy monitoring-route validation"
 echo
@@ -444,11 +480,12 @@ echo "             ${C_DIM}the project the project-scoped storage-I/O check quer
 echo "    window   ${WINDOW}"
 echo "             ${C_DIM}lookback for every OxQL timeseries query (widen with -w on a quiet rack).${C_R}"
 echo
+fi
 
 # ---------------------------------------------------------------------------
 # External API routes
 # ---------------------------------------------------------------------------
-echo "External API"
+[[ "$MODE" == "full" ]] && echo "External API"
 run_api  ping              "/v1/ping"                                       '1'
 run_api  rack_list         "/v1/system/hardware/racks"                      '.items | length'
 run_api  sled_list         "/v1/system/hardware/sleds"                      '.items | length'
@@ -468,8 +505,7 @@ run_api  ts_schemas        "/v1/system/timeseries/schemas"                  '.it
 # ---------------------------------------------------------------------------
 RF=""; [[ -n "$RACK" ]] && RF=" && rack_id == \"$RACK\""
 
-echo
-echo "OxQL — fleet scope (needs fleet.viewer)"
+[[ "$MODE" == "full" ]] && { echo; echo "OxQL — fleet scope (needs fleet.viewer)"; }
 run_oxql M-INST-check       fleet "get virtual_machine:check | filter timestamp > @now() - ${WINDOW}"
 run_oxql M-INST-incomplete  fleet "get virtual_machine:incomplete_check | filter timestamp > @now() - ${WINDOW}"
 run_oxql M-DDM-SLED         fleet "get ddm_session:imported_underlay_prefixes | filter timestamp > @now() - ${WINDOW} && datum > 0"
@@ -495,8 +531,7 @@ run_oxql M-DATASET          fleet "get zfs_dataset:bytes_used | filter timestamp
 # ---------------------------------------------------------------------------
 # OxQL route (project-scoped)
 # ---------------------------------------------------------------------------
-echo
-echo "OxQL — project scope (needs project viewer)"
+[[ "$MODE" == "full" ]] && { echo; echo "OxQL — project scope (needs project viewer)"; }
 if [[ -n "$PROJECT" ]]; then
   run_oxql M-STORAGE-IO     project "get virtual_disk:failed_reads | filter timestamp > @now() - 1h && datum > 0"
 else
@@ -504,32 +539,54 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Summary
+# Output — routes have run; RESULTS and telemetry are populated. What prints
+# depends on MODE; the exit status does not.
 # ---------------------------------------------------------------------------
-echo
-echo "Summary"
-printf '  %-18s %-8s %-7s %s\n' "ROUTE" "SCOPE" "STATUS" "DETAIL"
-printf '  %-18s %-8s %-7s %s\n' "-----" "-----" "------" "------"
-for r in "${RESULTS[@]}"; do
-  IFS='|' read -r id scope status detail <<<"$r"
-  printf '  %-18s %-8s ' "$id" "$scope"; paint "$status"; printf ' %s\n' "$detail"
-done
+VOLT_BAD=0
+[[ $DRYRUN -eq 0 ]] && VOLT_BAD="$(voltage_bad_count)"
 
-echo
-show_sleds
-show_zones
-show_storage
-show_voltage
+case "$MODE" in
+  coverage)
+    show_coverage
+    show_result
+    ;;
+  short)
+    print_summary
+    [[ "${VOLT_BAD:-0}" -gt 0 ]] && show_voltage
+    ;;
+  *)  # full
+    print_summary
+    echo
+    show_sleds
+    show_zones
+    show_storage
+    show_voltage
+    echo "Legend: ${C_OK}OK${C_R}=data returned  ${C_WARN}EMPTY${C_R}=ran, no rows (healthy for the M-THERM-tctl fault filter)"
+    echo "        ${C_ERR}DENIED${C_R}=permission (check token role)  ${C_ERR}FAIL${C_R}=error (see -v)  ${C_DIM}SKIP${C_R}=not run"
+    ;;
+esac
 
-echo "Legend: ${C_OK}OK${C_R}=data returned  ${C_WARN}EMPTY${C_R}=ran, no rows (healthy for the M-THERM-tctl fault filter)"
-echo "        ${C_ERR}DENIED${C_R}=permission (check token role)  ${C_ERR}FAIL${C_R}=error (see -v)  ${C_DIM}SKIP${C_R}=not run"
-echo
-show_coverage
-show_result
+# ---------------------------------------------------------------------------
+# Exit status (every mode): non-zero on a failed/denied route or a dropped rail
+# ---------------------------------------------------------------------------
+issue=0
+[[ $FAILED -ne 0 ]] && issue=1
+[[ "${VOLT_BAD:-0}" -gt 0 ]] && issue=1
 
-if [[ $FAILED -ne 0 ]]; then
-  echo "${C_ERR}One or more routes failed or were denied.${C_R} Re-run with -v for details."
-  exit 1
+if [[ "$MODE" != "coverage" ]]; then
+  echo
+  if [[ $issue -ne 0 ]]; then
+    reasons=""
+    [[ $FAILED -ne 0 ]] && reasons="one or more routes failed or were denied"
+    if [[ "${VOLT_BAD:-0}" -gt 0 ]]; then
+      [[ -n "$reasons" ]] && reasons="$reasons; "
+      reasons="${reasons}${VOLT_BAD} voltage rail(s) below 0.5 V"
+    fi
+    printf '  %sISSUE%s — %s. Re-run with -v for details.\n' "$C_ERR" "$C_R" "$reasons"
+  else
+    printf '  %sOK%s — all executed routes reachable, no anomalies.\n' "$C_OK" "$C_R"
+  fi
 fi
-echo "${C_OK}All executed routes reachable.${C_R}"
+
+[[ $issue -ne 0 ]] && exit 1
 exit 0
