@@ -159,24 +159,53 @@ run_oxql() {
 # Inventory display (informational; not part of pass/fail)
 # ---------------------------------------------------------------------------
 
-# show_sleds — every sled in the rack, from the external API.
+# show_sleds — one row per sled with the counts that should be uniform across
+# the rack, so outliers stand out. THREADS, RAM_GiB, DISKS and ZONES should
+# match sled-to-sled (within a hardware generation); INSTANCES is workload-
+# dependent and informational. DISKS and INSTANCES come from the per-sled
+# endpoints because the fleet-wide lists paginate.
 show_sleds() {
   [[ $DRYRUN -eq 1 ]] && return
   echo
-  echo "Sleds in rack"
-  local out="$TMP/inv_sleds.out"
-  if ! oxide api /v1/system/hardware/sleds >"$out" 2>"$TMP/inv_sleds.err"; then
+  echo "Per-sled inventory  ${C_DIM}(THREADS/RAM_GiB/DISKS/ZONES should match across sleds; INSTANCES is workload-dependent)${C_R}"
+  local sl="$TMP/inv_sleds.out"
+  if ! oxide api /v1/system/hardware/sleds >"$sl" 2>"$TMP/inv_sleds.err"; then
     echo "  ${C_ERR}could not list sleds:${C_R} $(head -1 "$TMP/inv_sleds.err")"
     return
   fi
-  { printf 'SERIAL\tSTATE\tPOLICY\tTHREADS\tRAM_GiB\tSLED_ID\n'
-    jq -r '.items | sort_by(.baseboard.serial)[]
-           | [ .baseboard.serial, .state, .policy.kind,
-               (.usable_hardware_threads|tostring),
-               ((.usable_physical_ram/1073741824)|floor|tostring),
-               .id ] | @tsv' "$out"
+
+  # Per-sled disk and instance counts (per-sled endpoints; the fleet lists paginate).
+  local pf="$TMP/persled.tsv"; : >"$pf"
+  local sid dc ic
+  while read -r sid; do
+    dc=$(oxide api "/v1/system/hardware/sleds/${sid}/disks"     2>/dev/null | jq -r '.items|length' 2>/dev/null)
+    ic=$(oxide api "/v1/system/hardware/sleds/${sid}/instances" 2>/dev/null | jq -r '.items|length' 2>/dev/null)
+    printf '%s\t%s\t%s\n' "$sid" "${dc:-?}" "${ic:-?}" >>"$pf"
+  done < <(jq -r '.items[].id' "$sl")
+  local pj="$TMP/persled.json"
+  jq -Rn '[inputs|split("\t")|{(.[0]):{d:((.[1]|tonumber?) // .[1]), i:((.[2]|tonumber?) // .[2])}}]|add // {}' "$pf" >"$pj"
+
+  # Zone counts per serial from the M-ZONES telemetry, if the validation run captured it.
+  local zj="$TMP/zonecounts.json"
+  if [[ -s "$TMP/M-ZONES.out" ]]; then
+    jq '[.tables[].timeseries[]|{s:.fields.sled_serial.value,z:.fields.zone_name.value}]
+        | group_by(.s) | map({key:.[0].s, value:([.[].z]|unique|length)}) | from_entries' \
+        "$TMP/M-ZONES.out" >"$zj" 2>/dev/null || echo '{}' >"$zj"
+  else echo '{}' >"$zj"; fi
+
+  { printf 'SERIAL\tSTATE\tPOLICY\tTHREADS\tRAM_GiB\tDISKS\tZONES\tINSTANCES\n'
+    jq -r --slurpfile per "$pj" --slurpfile zc "$zj" '
+      ($per[0]) as $p | ($zc[0]) as $z
+      | .items | sort_by(.baseboard.serial)[]
+      | [ .baseboard.serial, .state, .policy.kind,
+          (.usable_hardware_threads|tostring),
+          ((.usable_physical_ram/1073741824)|floor|tostring),
+          (($p[.id].d) // "?" | tostring),
+          (($z[.baseboard.serial]) // "?" | tostring),
+          (($p[.id].i) // "?" | tostring) ] | @tsv' "$sl"
   } | { column -t -s "$(printf '\t')" 2>/dev/null || cat; } | sed 's/^/  /'
-  printf '  %s%s sled(s)%s\n' "$C_DIM" "$(jq -r '.items|length' "$out")" "$C_R"
+  printf '  %s%s sled(s); DISKS/ZONES blank as "?" mean the sled did not answer or had no telemetry%s\n' \
+    "$C_DIM" "$(jq -r '.items|length' "$sl")" "$C_R"
 }
 
 # show_zones — zones per sled, from sled_data_link telemetry (the M-ZONES query).
