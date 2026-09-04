@@ -28,7 +28,7 @@ FROM alpine:${ALPINE_VERSION} AS builder
 ARG OXIDE_VERSION
 ARG BATS_VERSION
 # hadolint ignore=DL3018
-RUN apk add --no-cache curl tar xz
+RUN apk add --no-cache curl tar xz bash
 
 WORKDIR /build
 
