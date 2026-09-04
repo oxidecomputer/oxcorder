@@ -26,9 +26,12 @@
 # fleet.viewer). All timeseries are queried fleet-wide, across every silo.
 #
 # Usage:
-#   ./oxcorder.sh [-w WINDOW] [-s|-c] [-v] [-n]
+#   ./oxcorder.sh [-w WINDOW] [-t SECS] [-s|-c] [-v] [-n]
 #
 #   -w WINDOW      OxQL lookback window (default 5m). Widen on a quiet rack.
+#   -t SECS        Per-call timeout in seconds (default 30, or $OXC_TIMEOUT).
+#                  Raise it if a wide query (e.g. voltage on a large fleet)
+#                  is killed and shows FAIL.
 #   -s             Short: Summary plus any anomalies only; exit non-zero on an
 #                  issue. Runs every route but suppresses the detail sections.
 #                  Meant to be called from a script.
@@ -56,8 +59,8 @@ VERBOSE=0
 DRYRUN=0
 MODE="full"   # full | short | coverage
 # Hard cap (seconds) on each oxide invocation so a hung backend can't stall the
-# whole run. Only applied in non-dry-run mode.
-TIMEOUT=30
+# whole run. Default 30; override with $OXC_TIMEOUT or -t. Non-dry-run only.
+TIMEOUT="${OXC_TIMEOUT:-30}"
 # Resolved in preflight to "timeout", "gtimeout", or "" (run without a cap).
 TIMEOUT_BIN=""
 # Voltage rails that are legitimately unpopulated (read ~0 V) and must not be
@@ -445,9 +448,11 @@ voltage_bad_count() {
 # tests) to reach the helpers without executing a run.
 # ---------------------------------------------------------------------------
 main() {
-while getopts ":w:scvnh" opt; do
+while getopts ":w:t:scvnh" opt; do
   case "$opt" in
     w) WINDOW="$OPTARG" ;;
+    t) [[ "$OPTARG" =~ ^[0-9]+$ ]] || { echo "-t needs a whole number of seconds" >&2; usage 1; }
+       TIMEOUT="$OPTARG" ;;
     s) MODE="short" ;;
     c) MODE="coverage" ;;
     v) VERBOSE=1 ;;
@@ -469,8 +474,9 @@ if [[ $DRYRUN -eq 0 ]]; then
     echo "${C_WARN}note: no timeout/gtimeout found — running without a per-call cap${C_R}" >&2
     echo "${C_DIM}      (brew install coreutils to get one)${C_R}" >&2
   fi
-  if ! oxide auth status >/dev/null 2>&1; then
-    echo "${C_ERR}not authenticated — run 'oxide auth login' first${C_R}" >&2
+  if ! ox oxide auth status >/dev/null 2>&1; then
+    echo "${C_ERR}oxide auth status failed — not authenticated, or the rack is${C_R}" >&2
+    echo "${C_ERR}unreachable within ${TIMEOUT}s. Run 'oxide auth login', or raise -t.${C_R}" >&2
     exit 2
   fi
 fi

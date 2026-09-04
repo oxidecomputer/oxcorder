@@ -12,6 +12,9 @@
 #   docker run --rm -e OXIDE_HOST=https://<silo>.sys.<rack>.example.com \
 #                   -e OXIDE_TOKEN=oxide-token-... oxcorder -s
 #
+# On a big fleet, raise the per-call timeout so wide queries are not killed:
+#   docker run --rm -e OXC_TIMEOUT=90 ... oxcorder -s
+#
 # Override any pinned version at build time, e.g.:
 #   docker build --build-arg OXIDE_VERSION=v0.19.0+... -t oxcorder .
 

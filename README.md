@@ -44,12 +44,16 @@ a rack, not as a drop-in service for rack monitoring.
 ./oxcorder.sh -n             # dry run: print commands, run nothing
 ./oxcorder.sh -v             # verbose: echo each command and raw errors
 ./oxcorder.sh -w 30m         # use a lookback period of 30m instead of the default 5m
+./oxcorder.sh -t 60          # 60s per-call timeout (raise for wide queries on a big fleet)
 ./oxcorder.sh -h             # help
 ```
 
 Flags:
 
 - `-w WINDOW` — OxQL lookback window (default `5m`). Widen on a quiet rack.
+- `-t SECS` — per-call timeout in seconds (default `30`, or the `OXC_TIMEOUT` env var).
+  Raise it if a wide query (e.g. `hardware_component:voltage` on a large fleet) is killed
+  and shows `FAIL`.
 - `-s` — short: Summary plus any anomalies only; exit non-zero on an issue. Runs every
   route but suppresses the detail sections. Meant to be called from a script.
 - `-c` — coverage: show only the techport-check coverage table and the per-check run
@@ -116,6 +120,13 @@ mount that instead of passing a token:
 
 ```
 docker run --rm -v ~/.config/oxide:/root/.config/oxide:ro oxcorder -s
+```
+
+On a large fleet the wide queries can exceed the 30s per-call timeout and show
+`FAIL`; give them more room with `-t` or the `OXC_TIMEOUT` env var:
+
+```
+docker run --rm -e OXC_TIMEOUT=90 -v ~/.config/oxide:/root/.config/oxide:ro oxcorder -s
 ```
 
 `run` (the default) takes any oxcorder flag (`-s`, `-c`, `-w 30m`); `test` runs
