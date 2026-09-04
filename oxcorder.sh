@@ -45,6 +45,11 @@
 # Exit status: 0 when every executed route is reachable and no voltage anomaly
 # was found; 1 if a route FAILED or was DENIED, or a rail read below 0.5 V.
 # This holds in every mode, so -s is safe to gate a script on.
+#
+# Environment:
+#   OXC_TIMEOUT     default per-call timeout, seconds (-t overrides).
+#   NO_COLOR        disable colour (https://no-color.org).
+#   CLICOLOR_FORCE  force colour even without a TTY (e.g. in a container).
 
 set -uo pipefail
 # NOTE: no `-e` — failures are handled explicitly per command; an uncapped
@@ -73,11 +78,19 @@ usage() { awk 'NR>1 && /^#/ {sub(/^# ?/,""); print; next} NR>1 {exit}' "$0"; exi
 # ---------------------------------------------------------------------------
 # Output helpers
 # ---------------------------------------------------------------------------
-if [[ -t 1 ]]; then
+# Colour when stdout is a TTY. NO_COLOR (no-color.org) disables it; CLICOLOR_FORCE
+# or FORCE_COLOR force it even without a TTY — e.g. `docker run -e CLICOLOR_FORCE=1`.
+if [[ -n "${NO_COLOR:-}" ]]; then _color=0
+elif [[ -n "${CLICOLOR_FORCE:-}" || -n "${FORCE_COLOR:-}" ]]; then _color=1
+elif [[ -t 1 ]]; then _color=1
+else _color=0
+fi
+if [[ $_color -eq 1 ]]; then
   C_OK=$'\033[32m'; C_WARN=$'\033[33m'; C_ERR=$'\033[31m'; C_DIM=$'\033[2m'; C_R=$'\033[0m'
 else
   C_OK=""; C_WARN=""; C_ERR=""; C_DIM=""; C_R=""
 fi
+unset _color
 
 # Collected results: "ID|SCOPE|STATUS|DETAIL"
 declare -a RESULTS=()

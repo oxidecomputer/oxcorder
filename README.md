@@ -129,6 +129,15 @@ On a large fleet the wide queries can exceed the 30s per-call timeout and show
 docker run --rm -e OXC_TIMEOUT=90 -v ~/.config/oxide:/root/.config/oxide:ro oxcorder -s
 ```
 
+Colour is on only when stdout is a TTY, which `docker run` is not — add `-t`,
+or (better for piping/logs) force it without a TTY via `CLICOLOR_FORCE`:
+
+```
+docker run --rm -e CLICOLOR_FORCE=1 -v ~/.config/oxide:/root/.config/oxide:ro oxcorder -s
+```
+
+`NO_COLOR=1` turns colour off anywhere.
+
 `run` (the default) takes any oxcorder flag (`-s`, `-c`, `-w 30m`); `test` runs
 the bats suite; `shell` drops you into bash. Pinned versions are build args —
 `ALPINE_VERSION`, `OXIDE_VERSION`, `BATS_VERSION` — e.g. to move the CLI:
