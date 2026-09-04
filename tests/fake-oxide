@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# Minimal fake `oxide` for the bats tests. Returns canned JSON per subcommand.
+# Point OXC_FIXTURES at the fixtures dir; falls back to inline defaults.
+FX="${OXC_FIXTURES:-}"
+emit() { if [[ -n "$FX" && -f "$FX/$1" ]]; then cat "$FX/$1"; else printf '%s' "$2"; fi; }
+EMPTY_TS='{"tables":[{"timeseries":[]}]}'
+EMPTY_ITEMS='{"items":[]}'
+
+case "${1:-}" in
+  auth) exit 0 ;;                       # oxide auth status
+  api)
+    case "${2:-}" in
+      /v1/ping) echo '{}' ;;
+      /v1/system/hardware/racks) echo '{"items":[{"id":"rack-1","time_created":"t","time_modified":"t"}]}' ;;
+      /v1/system/hardware/sleds) echo '{"items":[{"id":"s1","baseboard":{"serial":"BRM0001"},"state":"active","policy":{"kind":"in_service"},"usable_hardware_threads":128,"usable_physical_ram":1085271703552}]}' ;;
+      /v1/system/hardware/switches) echo "$EMPTY_ITEMS" ;;
+      /v1/system/hardware/disks) echo '{"items":[{"id":"d1","sled_id":"s1"}]}' ;;
+      */disks) echo '{"items":[{"id":"d1"}]}' ;;
+      */instances) echo "$EMPTY_ITEMS" ;;
+      /v1/system/timeseries/schemas) echo '{"items":[{"name":"x"}]}' ;;
+      *) echo "$EMPTY_ITEMS" ;;
+    esac ;;
+  experimental)
+    q="$*"
+    case "$q" in
+      *"get zfs_pool:bytes_allocated"*)   emit pool_alloc.out "$EMPTY_TS" ;;
+      *"get zfs_pool:bytes_total"*)       emit pool_total.out "$EMPTY_TS" ;;
+      *"get sled_data_link:bytes_sent"*)  emit M-ZONES.out "$EMPTY_TS" ;;
+      *"get hardware_component:voltage"*) emit M-MEM-voltage.out "$EMPTY_TS" ;;
+      *) echo "$EMPTY_TS" ;;
+    esac ;;
+  *) echo '{}' ;;
+esac

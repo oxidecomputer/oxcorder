@@ -66,17 +66,6 @@ VOLT_IGNORE='["V12_MCIO_A0HP"]'
 
 usage() { awk 'NR>1 && /^#/ {sub(/^# ?/,""); print; next} NR>1 {exit}' "$0"; exit "${1:-0}"; }
 
-while getopts ":w:scvnh" opt; do
-  case "$opt" in
-    w) WINDOW="$OPTARG" ;;
-    s) MODE="short" ;;
-    c) MODE="coverage" ;;
-    v) VERBOSE=1 ;;
-    n) DRYRUN=1 ;;
-    h) usage 0 ;;
-    *) echo "unknown option: -$OPTARG" >&2; usage 1 ;;
-  esac
-done
 
 # ---------------------------------------------------------------------------
 # Output helpers
@@ -112,26 +101,6 @@ paint() {
 # ---------------------------------------------------------------------------
 need() { command -v "$1" >/dev/null 2>&1 || { echo "${C_ERR}missing dependency: $1${C_R}" >&2; exit 2; }; }
 
-if [[ $DRYRUN -eq 0 ]]; then
-  need oxide
-  need jq
-  # macOS has no `timeout`; coreutils provides `gtimeout`. Detect one, or run
-  # without a per-call cap (with a warning) rather than failing every route.
-  if command -v timeout  >/dev/null 2>&1; then TIMEOUT_BIN="timeout"
-  elif command -v gtimeout >/dev/null 2>&1; then TIMEOUT_BIN="gtimeout"
-  else
-    TIMEOUT_BIN=""
-    echo "${C_WARN}note: no timeout/gtimeout found — running without a per-call cap${C_R}" >&2
-    echo "${C_DIM}      (brew install coreutils to get one)${C_R}" >&2
-  fi
-  if ! oxide auth status >/dev/null 2>&1; then
-    echo "${C_ERR}not authenticated — run 'oxide auth login' first${C_R}" >&2
-    exit 2
-  fi
-fi
-
-TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
 
 # Classify an oxide error body into DENIED (permission) vs FAIL (anything else).
 classify_err() {
@@ -471,6 +440,45 @@ voltage_bad_count() {
 }
 
 # ---------------------------------------------------------------------------
+# main — arg parsing, preflight, discovery, routes, output, exit. Wrapped in a
+# function guarded by BASH_SOURCE so the script can be sourced (e.g. by the bats
+# tests) to reach the helpers without executing a run.
+# ---------------------------------------------------------------------------
+main() {
+while getopts ":w:scvnh" opt; do
+  case "$opt" in
+    w) WINDOW="$OPTARG" ;;
+    s) MODE="short" ;;
+    c) MODE="coverage" ;;
+    v) VERBOSE=1 ;;
+    n) DRYRUN=1 ;;
+    h) usage 0 ;;
+    *) echo "unknown option: -$OPTARG" >&2; usage 1 ;;
+  esac
+done
+
+if [[ $DRYRUN -eq 0 ]]; then
+  need oxide
+  need jq
+  # macOS has no `timeout`; coreutils provides `gtimeout`. Detect one, or run
+  # without a per-call cap (with a warning) rather than failing every route.
+  if command -v timeout  >/dev/null 2>&1; then TIMEOUT_BIN="timeout"
+  elif command -v gtimeout >/dev/null 2>&1; then TIMEOUT_BIN="gtimeout"
+  else
+    TIMEOUT_BIN=""
+    echo "${C_WARN}note: no timeout/gtimeout found — running without a per-call cap${C_R}" >&2
+    echo "${C_DIM}      (brew install coreutils to get one)${C_R}" >&2
+  fi
+  if ! oxide auth status >/dev/null 2>&1; then
+    echo "${C_ERR}not authenticated — run 'oxide auth login' first${C_R}" >&2
+    exit 2
+  fi
+fi
+
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+
+# ---------------------------------------------------------------------------
 # Discovery
 # ---------------------------------------------------------------------------
 SLED="" ; SERIAL=""
@@ -596,3 +604,9 @@ fi
 
 [[ $issue -ne 0 ]] && exit 1
 exit 0
+}
+
+# Run only when executed directly, not when sourced (tests source this file).
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  main "$@"
+fi

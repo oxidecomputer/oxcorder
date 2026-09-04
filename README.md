@@ -72,6 +72,21 @@ every mode, so `-s` is safe to gate a script on.
   the fleet grows. There is no single-rack CLI restriction; queries read fleet-wide.
 - Everything is read-only: nothing is created, modified, or deleted.
 
+## Testing
+
+Unit and smoke tests use [bats-core](https://github.com/bats-core/bats-core):
+
+```
+./tests/run.sh        # checks bats + jq are installed, then runs the suite
+```
+
+They exercise the jq transforms and verdict logic (zone grouping, the U.2/M.2
+storage split, the voltage anomaly scan and its ignore list, the per-check
+run-result, `classify_err`, and the timeout fallback) against fixtures under
+`tests/fixtures/` — no rack needed — plus one end-to-end run driven by a fake
+`oxide` on `PATH`. The harness is sourced by the tests via a `BASH_SOURCE`
+main-guard, so sourcing it defines the functions without starting a run.
+
 ## Status
 
 Queries are validated against the omicron OxQL grammar and the nexus authz code with
