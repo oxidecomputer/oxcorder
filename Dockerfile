@@ -40,7 +40,7 @@ RUN set -eux; \
     mkdir -p oxide && tar -xJf oxide.tar.xz -C oxide; \
     bin="$(find oxide -type f -name oxide | head -1)"; \
     install -m 0755 "$bin" /usr/local/bin/oxide; \
-    /usr/local/bin/oxide --version
+    /usr/local/bin/oxide --help >/dev/null   # smoke: binary runs under musl and clap parses
 
 # bats-core, installed under a single prefix so the final stage copies one dir
 RUN set -eux; \
