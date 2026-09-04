@@ -111,6 +111,13 @@ docker run --rm \
   oxcorder -s
 ```
 
+Or, if you authenticate with `oxide auth login` (which writes `~/.config/oxide/`),
+mount that instead of passing a token:
+
+```
+docker run --rm -v ~/.config/oxide:/root/.config/oxide:ro oxcorder -s
+```
+
 `run` (the default) takes any oxcorder flag (`-s`, `-c`, `-w 30m`); `test` runs
 the bats suite; `shell` drops you into bash. Pinned versions are build args —
 `ALPINE_VERSION`, `OXIDE_VERSION`, `BATS_VERSION` — e.g. to move the CLI:
