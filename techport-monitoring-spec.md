@@ -1,28 +1,44 @@
-# Technician-Port Health Check → Customer-Consumable Monitoring Spec
+# Technician-Port Health Check: Customer-Consumable Monitoring Spec
 
-*Standing monitoring spec for replacing the technician-port (techport) privileged-access health check with external API, wicket, and oximeter/OxQL.*
-*Target: latest release. Wicket scope: customer TUI only. Date: 2026-09-02.*
-*OxQL validated against omicron `oximeter/db/src/oxql/ast/grammar.rs`; permissions against `nexus/src/app/metrics.rs`.*
 
 ## Purpose
 
-The privileged-access health check (`check-health`) runs entirely over the technician port: SSH into the switch zone, SSH from there into every sled's global zone, plus a few wicketd calls on the same network. This spec replaces those checks with surfaces a customer already has — the external API, the wicket TUI, and oximeter timeseries queried through the API — so the checks can run 24/7/365 as standing monitors instead of a synchronous, techport-bound sweep.
+Today the health check for customer racks runs inside the `rkdeploy` (internal) binary and steps through twelve areas looking for issues. It needs
+techport access, which requires a special yubikey token.
 
-The design assumption is continuous collection. A synchronous SSH check answers "healthy right now." A continuously collected timeseries answers "healthy, and trending which way," and it makes one thing queryable that has no direct API: the **absence of expected telemetry**. A control-plane zone that dies stops emitting its data-link and HTTP series; the monitor detects the gap, not the `svcs` state. Oxide support already uses this technique in the field (see cs-914, where a sled hang was pinned to the timestamp `sled_data_link:bytes_received` stopped emitting).
+Checks are rarely removed, so the set grows over time and some now test for problems that were fixed long ago. This addresses two gaps:
+
+1. Run the checks with customer fleet access against the external APIs and the oximeter collection.
+2. Reduce the set to checks that are useful now for alerting on real problems.
+
+Two caveats:
+
+1. This is a reference implementation. Do not make it load-bearing infrastructure unless you have reviewed and validated it.
+2. Over time most of these checks will move into the in-progress FMA subsystem.
+
+The design assumes continuous collection. The current approach over the techport gives a point-in-time health reading; we would rather know
+"healthy, and trending which way". Continuous metrics also let us catch telemetry that stops or gaps, which points at a component in trouble.
+
 
 ## Permissions
 
-Two tiers, taken from the authz code, not inferred.
+Single tier, taken from the authz code, not inferred:
 
-**Fleet read — minimum built-in role `fleet.viewer`.** Every monitor except M-STORAGE-IO needs this. `system_timeseries_query` authorizes `Action::Read` on `authz::FLEET` (`nexus/src/app/metrics.rs:138`), and the fleet timeseries (`ddm_session`, `hardware_component`, `sled_data_link`, `http_service`, `virtual_machine`, `zfs_pool`, `zfs_dataset`) are all `authz_scope = "fleet"`. The `/v1/system/hardware/*` endpoints sit on the same footing. Per `omicron/docs/debugging-authz.adoc`, the `viewer` role grants `read`, and `fleet.viewer` is "can read most resources in the system." A read-only fleet token suffices — no admin or collaborator.
+- **Fleet read — minimum built-in role `fleet.viewer`.** Every monitor uses this. Fleet-scoped timeseries (`ddm_session`, `hardware_component`, `sled_data_link`, `http_service`, `virtual_machine`, `zfs_pool`, `zfs_dataset`) and `/v1/system/hardware/*` endpoints all authorize on `authz::FLEET`. A read-only fleet token suffices — no admin or collaborator role needed.
 
-**All routes are fleet-scoped.** Even M-STORAGE-IO, whose `virtual_disk` series carries `authz_scope = "project"`, is queried through the fleet `system_timeseries_query` endpoint, which injects no project filter (`insert_authz_filters` returns the query unchanged for `Fleet`) — so it runs with `fleet.viewer` and covers every silo's disks rack-wide. (A project viewer could instead read only their own project via the `--project` path, but the harness does not.)
+All routes are fleet-scoped. Even M-STORAGE-IO, whose `virtual_disk` series carries `authz_scope = "project"`, runs through the fleet `system_timeseries_query` endpoint, which injects no project filter — so `fleet.viewer` covers every silo's disks rack-wide.
 
-Caveats: `metrics.rs` carries an explicit `TODO-security` — fleet timeseries have no finer-grained scoping yet, so `fleet.viewer` is all-or-nothing (it reads every silo's metrics; a token cannot be scoped to one rack's sleds). Wicket (checks 1, 2, 6) is a separate access path: physical technician-port plus SSH to the switch, not silo RBAC.
+No wicket (physical technician-port / SSH to switch) access is needed. The commissioning-time values once read from wicket (checks 1, 2) are tracked by the `rkdeploy` process itself, outside the running rack — see Group F.
 
-## OxQL conventions (validated)
+Caveats:
 
-Confirmed against the grammar:
+- Fleet timeseries have no finer-grained scoping yet — `fleet.viewer` is all-or-nothing (it reads every silo's metrics; a token cannot be scoped to one rack's sleds).
+- `fleet.viewer` is "can read most resources in the system" per the role model.
+
+For implementation details, see [Authorization reference](#authorization-reference) below.
+
+## OxQL conventions
+
 
 - Table ops are `get`, `filter`, `align`, `group_by`, `join`, `limit`. Timeseries name is `target:metric`.
 - `group_by [fields], <reducer>` supports **only `mean` and `sum`** — there is no `count` and no `max` reducer. To count sessions, zones, or links per group, enumerate the returned timeseries client-side (one series per unique field tuple); OxQL does not count server-side.
@@ -112,7 +128,7 @@ oxide experimental timeseries query --query \
 
 - **Window / cadence:** 5m window, evaluate every 1m.
 - **Condition:** enumerate distinct `sled_id` in the result. A sled in the API roster whose newest sample is older than roughly 90 seconds (about nine missed intervals) has gone dark.
-- **Severity:** critical. Also visible directly in the wicket System Inventory power state.
+- **Severity:** critical.
 
 #### M-MEM — Memory (replaces check 7, `prtconf -m`)
 
@@ -146,7 +162,7 @@ oxide experimental timeseries query --query \
 - **Window / cadence:** 5m thermals, 15m error window; evaluate every 5m.
 - **Condition:** any `amd_cpu_tctl` point at or above `95.0` (internal throttling; `100.0` is shutdown, per the metric's own doc) — the literal must be decimal because the metric is floating-point. `sensor_error_count`/`poll_error_count` are cumulative, so a nonzero total is the rack's lifetime count, not an active fault (a live run matched 193 series that way, none of them faults); alert on the per-window increase from the aligned query above, not on `datum > 0`.
 - **Severity:** warning at Tctl 95, critical at 100 or on a rising sensor-error slope.
-- **Notes:** not in the original check set, but the cheapest high-value thing continuous collection buys, and the failure mode that dominates the field issues.
+- **Notes:** not in the original check set; continuous collection makes it cheap, and thermals are the failure mode most often seen in the field.
 
 ### Group D — Storage
 
@@ -219,7 +235,7 @@ oxide experimental timeseries query --query \
 
 ### Group F — Rack setup (commissioning-time, not standing)
 
-Checks 1 (`rss_time`) and 2 (`rss_state`) are one-shot commissioning values. The customer path is the wicket Rack Setup tab — the TUI surface over the same wicketd state the privileged-access check reads today. Once initialized, external API liveness (`ping`, `rack_list` returning) confirms the same fact.
+Checks 1 (`rss_time`) and 2 (`rss_state`) are one-shot commissioning values, tracked by the `rkdeploy` process itself rather than exposed by the rack. Post-commission they are no longer even visible in wicket, so they are outside the scope of any standing monitor here. Once a rack is initialized and serving, external API liveness (`ping`, `rack_list` returning) confirms the same fact to the degree it can be confirmed externally.
 
 ---
 
@@ -239,35 +255,36 @@ Checks 1 (`rss_time`) and 2 (`rss_state`) are one-shot commissioning values. The
 | M-ZONES | zones | `sled_data_link` | fleet | 5m | 5m | expected zone not emitting | crit |
 | M-SVC | services | `http_service` | fleet | 15m | 5m | service silent or latency shift | warn/crit |
 
-Seven of the original twelve checks become full replacements; four become trend proxies arguably better than the snapshot they replace; M-THERM is a bonus the original never had.
+Seven of the original twelve checks become full replacements; four become trend proxies that improve on the snapshot they replace; M-THERM is new.
 
 ## Residual gaps
 
-One check has no customer-consumable telemetry at any cadence, confirmed by the absence of any NVMe, SMART, wear, or reliability timeseries in the API spec:
+Original check 8 splits into two surfaces with no customer-consumable telemetry at any cadence, confirmed by the absence of any NVMe, SMART, wear, or reliability timeseries in the API spec:
 
 - **NVMe SMART "Device Reliability"** (check 8) — Nexus knows a disk is faulted, not that SMART predicts failure. Continuous collection does not help because the metric does not exist.
 - **U.2 block format (4096)** (check 8) — no customer surface exposes the block size.
 
-Both are commissioning-time correctness checks, so their absence matters most during bring-up. To survive the move off the techport, the ask is a new sled-agent/oximeter timeseries carrying per-disk SMART critical-warning fields and block format, scoped to fleet. That is the one feature request this migration depends on.
+Both are commissioning-time correctness checks, so their absence matters most during bring-up. To survive the move off the techport, we need a new sled-agent/oximeter timeseries carrying per-disk SMART critical-warning fields and block format, scoped to fleet.
 
-## Field validation
+## Known Issues
 
-First live run on 2026-09-03 (rack `de608e01-b8e4-4d93-b972-a7dbed36dd22`, latest release). All routes reachable with a `fleet.viewer` token; the project-scoped storage check ran clean at project scope. Corrections applied from that run:
+- `GET /v1/system/hardware/switches` returned 0 rows on this rack. Switch presence in this spec already routes through sled/rack presence rather than this endpoint, so the monitors are unaffected. This still needs follow-up.
 
-- `amd_cpu_tctl` threshold must use a decimal literal (`>= 95.0`); an integer literal errored (see the numeric-typing rule under OxQL conventions).
-- `sensor_error_count` is cumulative — the initial `datum > 0` matched lifetime totals (193 series), so the query and condition now read the per-window increase instead.
+## Authorization reference
 
-Observations worth a second look, not blockers:
+Detailed code-level notes on the permission tiers above.
 
-- `GET /v1/system/hardware/switches` returned 0 rows on this rack. Switch presence in this spec already routes through the wicket System Inventory, not this endpoint, so the monitors are unaffected — but if the API path is wanted for switch presence, confirm why it is empty on a running rack before relying on it.
+- `system_timeseries_query` authorizes `Action::Read` on `authz::FLEET` (`nexus/src/app/metrics.rs:138`).
+- The fleet timeseries are all `authz_scope = "fleet"`: `ddm_session`, `hardware_component`, `sled_data_link`, `http_service`, `virtual_machine`, `zfs_pool`, `zfs_dataset`. The `/v1/system/hardware/*` endpoints sit on the same footing.
+- Per `omicron/docs/debugging-authz.adoc`, the `viewer` role grants `read`, and `fleet.viewer` is "can read most resources in the system."
+- `metrics.rs` carries an explicit `TODO-security` — fleet timeseries have no finer-grained scoping yet, so `fleet.viewer` is all-or-nothing (it reads every silo's metrics; a token cannot be scoped to one rack's sleds).
+- `insert_authz_filters` returns the query unchanged for `Fleet`, so the fleet `system_timeseries_query` endpoint injects no project filter. (A project viewer could instead read only their own project via the `--project` path, but the harness does not.)
 
 ## Sources
 
-- `rkdeploy/crates/rack-core/src/health.rs`, `rack.rs`, `zone.rs` — the privileged-access (techport) checks being replaced (the `rkdeploy` repository is internal to Oxide; not customer-accessible).
 - `omicron/oximeter/db/src/oxql/ast/grammar.rs` — OxQL grammar (reducers `mean`/`sum` only; `align mean_within`; `filter datum`).
 - `omicron/nexus/src/app/metrics.rs` — timeseries authz (`Action::Read` on `FLEET`; project-scoped variant).
 - `omicron/docs/debugging-authz.adoc` — role model (`viewer` grants read; `fleet.viewer` reads the system).
 - `docs/app/specs/api.json` — external API endpoints.
 - `docs/app/specs/tables/{vm-health-check,ddm-session,ddm-router,hardware-component,sled-data-link,http-service,virtual-disk,switch-rib}.toml` — timeseries schemas and `authz_scope`.
-- `customer-support/runbooks/troubleshooting-commands.adoc`, `troubleshooting-access-matrix.adoc` — OxQL CLI and operator access.
-- `customer-support/toolbox/customer-status/issues_raw.json` — field use of the telemetry-gap technique (cs-914, cs-932).
+- Multiple internal oxide sources.
