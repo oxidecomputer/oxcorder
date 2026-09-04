@@ -19,14 +19,19 @@
 # Requires:
 #   - oxide CLI, authenticated (`oxide auth login`); check with `oxide auth status`
 #   - jq
+#   - timeout or gtimeout (optional; macOS provides gtimeout via coreutils).
+#     Without one, routes run with no per-call cap (a warning is printed).
 #
 # Permissions (see spec): every route needs a fleet-scoped token (minimum role
 # fleet.viewer). All timeseries are queried fleet-wide, across every silo.
 #
 # Usage:
-#   ./oxcorder.sh [-w WINDOW] [-s|-c] [-v] [-n]
+#   ./oxcorder.sh [-w WINDOW] [-t SECS] [-s|-c] [-v] [-n]
 #
 #   -w WINDOW      OxQL lookback window (default 5m). Widen on a quiet rack.
+#   -t SECS        Per-call timeout in seconds (default 30, or $OXC_TIMEOUT).
+#                  Raise it if a wide query (e.g. voltage on a large fleet)
+#                  is killed and shows FAIL.
 #   -s             Short: Summary plus any anomalies only; exit non-zero on an
 #                  issue. Runs every route but suppresses the detail sections.
 #                  Meant to be called from a script.
@@ -40,6 +45,11 @@
 # Exit status: 0 when every executed route is reachable and no voltage anomaly
 # was found; 1 if a route FAILED or was DENIED, or a rail read below 0.5 V.
 # This holds in every mode, so -s is safe to gate a script on.
+#
+# Environment:
+#   OXC_TIMEOUT     default per-call timeout, seconds (-t overrides).
+#   NO_COLOR        disable colour (https://no-color.org).
+#   CLICOLOR_FORCE  force colour even without a TTY (e.g. in a container).
 
 set -uo pipefail
 # NOTE: no `-e` — failures are handled explicitly per command; an uncapped
@@ -54,34 +64,33 @@ VERBOSE=0
 DRYRUN=0
 MODE="full"   # full | short | coverage
 # Hard cap (seconds) on each oxide invocation so a hung backend can't stall the
-# whole run. Only applied in non-dry-run mode.
-TIMEOUT=30
+# whole run. Default 30; override with $OXC_TIMEOUT or -t. Non-dry-run only.
+TIMEOUT="${OXC_TIMEOUT:-30}"
+# Resolved in preflight to "timeout", "gtimeout", or "" (run without a cap).
+TIMEOUT_BIN=""
 # Voltage rails that are legitimately unpopulated (read ~0 V) and must not be
 # flagged as dropped. JSON array of exact sensor names; extend as needed.
 VOLT_IGNORE='["V12_MCIO_A0HP"]'
 
 usage() { awk 'NR>1 && /^#/ {sub(/^# ?/,""); print; next} NR>1 {exit}' "$0"; exit "${1:-0}"; }
 
-while getopts ":w:scvnh" opt; do
-  case "$opt" in
-    w) WINDOW="$OPTARG" ;;
-    s) MODE="short" ;;
-    c) MODE="coverage" ;;
-    v) VERBOSE=1 ;;
-    n) DRYRUN=1 ;;
-    h) usage 0 ;;
-    *) echo "unknown option: -$OPTARG" >&2; usage 1 ;;
-  esac
-done
 
 # ---------------------------------------------------------------------------
 # Output helpers
 # ---------------------------------------------------------------------------
-if [[ -t 1 ]]; then
+# Colour when stdout is a TTY. NO_COLOR (no-color.org) disables it; CLICOLOR_FORCE
+# or FORCE_COLOR force it even without a TTY — e.g. `docker run -e CLICOLOR_FORCE=1`.
+if [[ -n "${NO_COLOR:-}" ]]; then _color=0
+elif [[ -n "${CLICOLOR_FORCE:-}" || -n "${FORCE_COLOR:-}" ]]; then _color=1
+elif [[ -t 1 ]]; then _color=1
+else _color=0
+fi
+if [[ $_color -eq 1 ]]; then
   C_OK=$'\033[32m'; C_WARN=$'\033[33m'; C_ERR=$'\033[31m'; C_DIM=$'\033[2m'; C_R=$'\033[0m'
 else
   C_OK=""; C_WARN=""; C_ERR=""; C_DIM=""; C_R=""
 fi
+unset _color
 
 # Collected results: "ID|SCOPE|STATUS|DETAIL"
 declare -a RESULTS=()
@@ -108,21 +117,16 @@ paint() {
 # ---------------------------------------------------------------------------
 need() { command -v "$1" >/dev/null 2>&1 || { echo "${C_ERR}missing dependency: $1${C_R}" >&2; exit 2; }; }
 
-if [[ $DRYRUN -eq 0 ]]; then
-  need oxide
-  need jq
-  if ! oxide auth status >/dev/null 2>&1; then
-    echo "${C_ERR}not authenticated — run 'oxide auth login' first${C_R}" >&2
-    exit 2
-  fi
-fi
-
-TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
 
 # Classify an oxide error body into DENIED (permission) vs FAIL (anything else).
 classify_err() {
   if grep -qiE '403|forbidden|unauthorized|permission' "$1"; then echo DENIED; else echo FAIL; fi
+}
+
+# ox — run a command under the detected timeout wrapper, or directly when
+# neither timeout nor gtimeout is installed (see preflight).
+ox() {
+  if [[ -n "$TIMEOUT_BIN" ]]; then "$TIMEOUT_BIN" "$TIMEOUT" "$@"; else "$@"; fi
 }
 
 # run_api ID PATH COUNT_JQ
@@ -132,7 +136,7 @@ run_api() {
   if [[ $DRYRUN -eq 1 ]]; then printf '  %-16s %sfleet%s  oxide api %s\n' "$id" "$C_DIM" "$C_R" "$path"; record "$id" fleet SKIP "dry-run"; return; fi
   [[ $VERBOSE -eq 1 ]] && echo "${C_DIM}scanning: timeout ${TIMEOUT} oxide api $path${C_R}" >&2
   local out; out="$TMP/$id.out"
-  if timeout "$TIMEOUT" oxide api "$path" >"$out" 2>"$TMP/$id.err"; then
+  if ox oxide api "$path" >"$out" 2>"$TMP/$id.err"; then
     local n; n="$(jq -r "$cjq" <"$out" 2>/dev/null || echo '?')"
     if [[ "$n" == "0" ]]; then record "$id" fleet EMPTY "0 rows"; else record "$id" fleet OK "${n} rows"; fi
   else
@@ -154,7 +158,7 @@ run_oxql() {
   fi
   [[ $VERBOSE -eq 1 ]] && echo "${C_DIM}scanning: timeout ${TIMEOUT} ${cmd[*]}${C_R}" >&2
   local out; out="$TMP/$id.out"
-  if timeout "$TIMEOUT" "${cmd[@]}" >"$out" 2>"$TMP/$id.err"; then
+  if ox "${cmd[@]}" >"$out" 2>"$TMP/$id.err"; then
     local n; n="$(jq -r '[.tables[].timeseries[]] | length' <"$out" 2>/dev/null || echo '?')"
     if [[ "$n" == "0" ]]; then record "$id" "$scope" EMPTY "0 series"; else record "$id" "$scope" OK "${n} series"; fi
   else
@@ -178,17 +182,24 @@ show_sleds() {
   echo
   echo "Per-sled inventory  ${C_DIM}(THREADS/RAM_GiB/DISKS/ZONES should match across sleds; INSTANCES is workload-dependent)${C_R}"
   local sl="$TMP/inv_sleds.out"
-  if ! timeout "$TIMEOUT" oxide api /v1/system/hardware/sleds >"$sl" 2>"$TMP/inv_sleds.err"; then
+  if ! ox oxide api /v1/system/hardware/sleds >"$sl" 2>"$TMP/inv_sleds.err"; then
     echo "  ${C_ERR}could not list sleds:${C_R} $(head -1 "$TMP/inv_sleds.err")"
     return
   fi
 
+  # NOTE — single-rack assumption: this loops EVERY sled from sled_list and makes
+  # two serial API calls per sled. Cheap today because deployments are single-rack
+  # (tens of sleds). If Oxcorder is ever pointed at a MULTI-RACK fleet, sled_list
+  # returns every sled across every rack and this becomes hundreds-to-thousands of
+  # serial calls. Before that day: scope it with an optional rack filter (re-add
+  # -r and filter sled_list by rack_id), and/or run the per-sled calls with
+  # bounded parallelism.
   # Per-sled disk and instance counts (per-sled endpoints; the fleet lists paginate).
   local pf="$TMP/persled.tsv"; : >"$pf"
   local sid dc ic
   while read -r sid; do
-    dc=$(timeout "$TIMEOUT" oxide api "/v1/system/hardware/sleds/${sid}/disks"     2>/dev/null | jq -r '.items|length' 2>/dev/null)
-    ic=$(timeout "$TIMEOUT" oxide api "/v1/system/hardware/sleds/${sid}/instances" 2>/dev/null | jq -r '.items|length' 2>/dev/null)
+    dc=$(ox oxide api "/v1/system/hardware/sleds/${sid}/disks"     2>/dev/null | jq -r '.items|length' 2>/dev/null)
+    ic=$(ox oxide api "/v1/system/hardware/sleds/${sid}/instances" 2>/dev/null | jq -r '.items|length' 2>/dev/null)
     printf '%s\t%s\t%s\n' "$sid" "${dc:-?}" "${ic:-?}" >>"$pf"
   done < <(jq -r '.items[].id' "$sl")
   local pj="$TMP/persled.json"
@@ -227,7 +238,7 @@ show_zones() {
   local out="$TMP/M-ZONES.out"        # reuse the validation query's output if present
   if [[ ! -s "$out" ]]; then
     out="$TMP/inv_zones.out"
-    if ! timeout "$TIMEOUT" oxide experimental system timeseries query \
+    if ! ox oxide experimental system timeseries query \
            --query "get sled_data_link:bytes_sent | filter timestamp > @now() - ${WINDOW}" \
            >"$out" 2>"$TMP/inv_zones.err"; then
       echo "  ${C_ERR}zone query failed:${C_R} $(head -1 "$TMP/inv_zones.err")"
@@ -267,12 +278,12 @@ show_storage() {
   echo
   echo "Storage per sled  ${C_DIM}(zfs_pool; EXT=U.2 data pools, INT=M.2 boot; USED/TOTAL are external pools; disk IO not available sled-wide — see spec)${C_R}"
   local a="$TMP/pool_alloc.out" t="$TMP/pool_total.out"
-  if ! timeout "$TIMEOUT" oxide experimental system timeseries query \
+  if ! ox oxide experimental system timeseries query \
          --query "get zfs_pool:bytes_allocated | filter timestamp > @now() - ${WINDOW}" \
          >"$a" 2>"$TMP/pool_a.err"; then
     echo "  ${C_ERR}zfs_pool query failed:${C_R} $(head -1 "$TMP/pool_a.err")"; return
   fi
-  timeout "$TIMEOUT" oxide experimental system timeseries query \
+  ox oxide experimental system timeseries query \
     --query "get zfs_pool:bytes_total | filter timestamp > @now() - ${WINDOW}" \
     >"$t" 2>/dev/null
   if [[ "$(jq -r '[.tables[].timeseries[]]|length' "$a" 2>/dev/null)" == "0" ]]; then
@@ -445,12 +456,56 @@ voltage_bad_count() {
 }
 
 # ---------------------------------------------------------------------------
+# main — arg parsing, preflight, discovery, routes, output, exit. Wrapped in a
+# function guarded by BASH_SOURCE so the script can be sourced (e.g. by the bats
+# tests) to reach the helpers without executing a run.
+# ---------------------------------------------------------------------------
+main() {
+while getopts ":w:t:scvnh" opt; do
+  case "$opt" in
+    w) WINDOW="$OPTARG" ;;
+    t) [[ "$OPTARG" =~ ^[0-9]+$ ]] || { echo "-t needs a whole number of seconds" >&2; usage 1; }
+       TIMEOUT="$OPTARG" ;;
+    s) MODE="short" ;;
+    c) MODE="coverage" ;;
+    v) VERBOSE=1 ;;
+    n) DRYRUN=1 ;;
+    h) usage 0 ;;
+    *) echo "unknown option: -$OPTARG" >&2; usage 1 ;;
+  esac
+done
+
+if [[ $DRYRUN -eq 0 ]]; then
+  need oxide
+  need jq
+  # macOS has no `timeout`; coreutils provides `gtimeout`. Detect one, or run
+  # without a per-call cap (with a warning) rather than failing every route.
+  if command -v timeout  >/dev/null 2>&1; then TIMEOUT_BIN="timeout"
+  elif command -v gtimeout >/dev/null 2>&1; then TIMEOUT_BIN="gtimeout"
+  else
+    TIMEOUT_BIN=""
+    echo "${C_WARN}note: no timeout/gtimeout found — running without a per-call cap${C_R}" >&2
+    echo "${C_DIM}      (brew install coreutils to get one)${C_R}" >&2
+  fi
+  if ! ox oxide auth status >/dev/null 2>&1; then
+    echo "${C_ERR}oxide auth status failed — not authenticated, or the rack is${C_R}" >&2
+    echo "${C_ERR}unreachable within ${TIMEOUT}s. Run 'oxide auth login', or raise -t.${C_R}" >&2
+    exit 2
+  fi
+fi
+
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+
+# ---------------------------------------------------------------------------
 # Discovery
 # ---------------------------------------------------------------------------
 SLED="" ; SERIAL=""
 if [[ $DRYRUN -eq 0 ]]; then
-  SLED="$(timeout "$TIMEOUT" oxide api /v1/system/hardware/sleds 2>/dev/null | jq -r '.items[0].id // empty')"
-  SERIAL="$(timeout "$TIMEOUT" oxide api /v1/system/hardware/sleds 2>/dev/null | jq -r '.items[0].baseboard.serial // empty')"
+  sleds_json="$(ox oxide api /v1/system/hardware/sleds 2>/dev/null)"
+  SLED="$(jq -r '.items[0].id // empty' <<<"$sleds_json")"
+  SERIAL="$(jq -r '.items[0].baseboard.serial // empty' <<<"$sleds_json")"
+  unset sleds_json
 fi
 
 if [[ "$MODE" == "full" ]]; then
@@ -568,3 +623,9 @@ fi
 
 [[ $issue -ne 0 ]] && exit 1
 exit 0
+}
+
+# Run only when executed directly, not when sourced (tests source this file).
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  main "$@"
+fi

@@ -44,12 +44,16 @@ a rack, not as a drop-in service for rack monitoring.
 ./oxcorder.sh -n             # dry run: print commands, run nothing
 ./oxcorder.sh -v             # verbose: echo each command and raw errors
 ./oxcorder.sh -w 30m         # use a lookback period of 30m instead of the default 5m
+./oxcorder.sh -t 60          # 60s per-call timeout (raise for wide queries on a big fleet)
 ./oxcorder.sh -h             # help
 ```
 
 Flags:
 
 - `-w WINDOW` — OxQL lookback window (default `5m`). Widen on a quiet rack.
+- `-t SECS` — per-call timeout in seconds (default `30`, or the `OXC_TIMEOUT` env var).
+  Raise it if a wide query (e.g. `hardware_component:voltage` on a large fleet) is killed
+  and shows `FAIL`.
 - `-s` — short: Summary plus any anomalies only; exit non-zero on an issue. Runs every
   route but suppresses the detail sections. Meant to be called from a script.
 - `-c` — coverage: show only the techport-check coverage table and the per-check run
@@ -71,6 +75,76 @@ every mode, so `-s` is safe to gate a script on.
   built-in dimension keyed per rack — ready to group or aggregate across racks as
   the fleet grows. There is no single-rack CLI restriction; queries read fleet-wide.
 - Everything is read-only: nothing is created, modified, or deleted.
+
+## Testing
+
+Unit and smoke tests use [bats-core](https://github.com/bats-core/bats-core):
+
+```
+./tests/run.sh        # checks bats + jq are installed, then runs the suite
+```
+
+They exercise the jq transforms and verdict logic (zone grouping, the U.2/M.2
+storage split, the voltage anomaly scan and its ignore list, the per-check
+run-result, `classify_err`, and the timeout fallback) against fixtures under
+`tests/fixtures/` — no rack needed — plus one end-to-end run driven by a fake
+`oxide` on `PATH`. The harness is sourced by the tests via a `BASH_SOURCE`
+main-guard, so sourcing it defines the functions without starting a run.
+
+## Container
+
+A pinned, self-contained image runs both the tests and live scans — Alpine plus
+bash, jq, the `oxide` CLI (static musl build), and bats-core:
+
+```
+docker build -t oxcorder .
+```
+
+Tests (no rack or auth needed):
+
+```
+docker run --rm oxcorder test
+```
+
+Live scan with a `fleet.viewer` token:
+
+```
+docker run --rm \
+  -e OXIDE_HOST="https://<silo>.sys.<rack>.example.com" \
+  -e OXIDE_TOKEN="oxide-token-..." \
+  oxcorder -s
+```
+
+Or, if you authenticate with `oxide auth login` (which writes `~/.config/oxide/`),
+mount that instead of passing a token:
+
+```
+docker run --rm -v ~/.config/oxide:/root/.config/oxide:ro oxcorder -s
+```
+
+On a large fleet the wide queries can exceed the 30s per-call timeout and show
+`FAIL`; give them more room with `-t` or the `OXC_TIMEOUT` env var:
+
+```
+docker run --rm -e OXC_TIMEOUT=90 -v ~/.config/oxide:/root/.config/oxide:ro oxcorder -s
+```
+
+Colour is on only when stdout is a TTY, which `docker run` is not — add `-t`,
+or (better for piping/logs) force it without a TTY via `CLICOLOR_FORCE`:
+
+```
+docker run --rm -e CLICOLOR_FORCE=1 -v ~/.config/oxide:/root/.config/oxide:ro oxcorder -s
+```
+
+`NO_COLOR=1` turns colour off anywhere.
+
+`run` (the default) takes any oxcorder flag (`-s`, `-c`, `-w 30m`); `test` runs
+the bats suite; `shell` drops you into bash. Pinned versions are build args —
+`ALPINE_VERSION`, `OXIDE_VERSION`, `BATS_VERSION` — e.g. to move the CLI:
+
+```
+docker build --build-arg OXIDE_VERSION=v0.19.0+... -t oxcorder .
+```
 
 ## Status
 
