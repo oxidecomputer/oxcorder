@@ -19,6 +19,8 @@
 # Requires:
 #   - oxide CLI, authenticated (`oxide auth login`); check with `oxide auth status`
 #   - jq
+#   - timeout or gtimeout (optional; macOS provides gtimeout via coreutils).
+#     Without one, routes run with no per-call cap (a warning is printed).
 #
 # Permissions (see spec): every route needs a fleet-scoped token (minimum role
 # fleet.viewer). All timeseries are queried fleet-wide, across every silo.
@@ -56,6 +58,8 @@ MODE="full"   # full | short | coverage
 # Hard cap (seconds) on each oxide invocation so a hung backend can't stall the
 # whole run. Only applied in non-dry-run mode.
 TIMEOUT=30
+# Resolved in preflight to "timeout", "gtimeout", or "" (run without a cap).
+TIMEOUT_BIN=""
 # Voltage rails that are legitimately unpopulated (read ~0 V) and must not be
 # flagged as dropped. JSON array of exact sensor names; extend as needed.
 VOLT_IGNORE='["V12_MCIO_A0HP"]'
@@ -111,6 +115,15 @@ need() { command -v "$1" >/dev/null 2>&1 || { echo "${C_ERR}missing dependency: 
 if [[ $DRYRUN -eq 0 ]]; then
   need oxide
   need jq
+  # macOS has no `timeout`; coreutils provides `gtimeout`. Detect one, or run
+  # without a per-call cap (with a warning) rather than failing every route.
+  if command -v timeout  >/dev/null 2>&1; then TIMEOUT_BIN="timeout"
+  elif command -v gtimeout >/dev/null 2>&1; then TIMEOUT_BIN="gtimeout"
+  else
+    TIMEOUT_BIN=""
+    echo "${C_WARN}note: no timeout/gtimeout found — running without a per-call cap${C_R}" >&2
+    echo "${C_DIM}      (brew install coreutils to get one)${C_R}" >&2
+  fi
   if ! oxide auth status >/dev/null 2>&1; then
     echo "${C_ERR}not authenticated — run 'oxide auth login' first${C_R}" >&2
     exit 2
@@ -125,6 +138,12 @@ classify_err() {
   if grep -qiE '403|forbidden|unauthorized|permission' "$1"; then echo DENIED; else echo FAIL; fi
 }
 
+# ox — run a command under the detected timeout wrapper, or directly when
+# neither timeout nor gtimeout is installed (see preflight).
+ox() {
+  if [[ -n "$TIMEOUT_BIN" ]]; then "$TIMEOUT_BIN" "$TIMEOUT" "$@"; else "$@"; fi
+}
+
 # run_api ID PATH COUNT_JQ
 #   GET an API path, count rows with COUNT_JQ (applied to the JSON body).
 run_api() {
@@ -132,7 +151,7 @@ run_api() {
   if [[ $DRYRUN -eq 1 ]]; then printf '  %-16s %sfleet%s  oxide api %s\n' "$id" "$C_DIM" "$C_R" "$path"; record "$id" fleet SKIP "dry-run"; return; fi
   [[ $VERBOSE -eq 1 ]] && echo "${C_DIM}scanning: timeout ${TIMEOUT} oxide api $path${C_R}" >&2
   local out; out="$TMP/$id.out"
-  if timeout "$TIMEOUT" oxide api "$path" >"$out" 2>"$TMP/$id.err"; then
+  if ox oxide api "$path" >"$out" 2>"$TMP/$id.err"; then
     local n; n="$(jq -r "$cjq" <"$out" 2>/dev/null || echo '?')"
     if [[ "$n" == "0" ]]; then record "$id" fleet EMPTY "0 rows"; else record "$id" fleet OK "${n} rows"; fi
   else
@@ -154,7 +173,7 @@ run_oxql() {
   fi
   [[ $VERBOSE -eq 1 ]] && echo "${C_DIM}scanning: timeout ${TIMEOUT} ${cmd[*]}${C_R}" >&2
   local out; out="$TMP/$id.out"
-  if timeout "$TIMEOUT" "${cmd[@]}" >"$out" 2>"$TMP/$id.err"; then
+  if ox "${cmd[@]}" >"$out" 2>"$TMP/$id.err"; then
     local n; n="$(jq -r '[.tables[].timeseries[]] | length' <"$out" 2>/dev/null || echo '?')"
     if [[ "$n" == "0" ]]; then record "$id" "$scope" EMPTY "0 series"; else record "$id" "$scope" OK "${n} series"; fi
   else
@@ -178,17 +197,24 @@ show_sleds() {
   echo
   echo "Per-sled inventory  ${C_DIM}(THREADS/RAM_GiB/DISKS/ZONES should match across sleds; INSTANCES is workload-dependent)${C_R}"
   local sl="$TMP/inv_sleds.out"
-  if ! timeout "$TIMEOUT" oxide api /v1/system/hardware/sleds >"$sl" 2>"$TMP/inv_sleds.err"; then
+  if ! ox oxide api /v1/system/hardware/sleds >"$sl" 2>"$TMP/inv_sleds.err"; then
     echo "  ${C_ERR}could not list sleds:${C_R} $(head -1 "$TMP/inv_sleds.err")"
     return
   fi
 
+  # NOTE — single-rack assumption: this loops EVERY sled from sled_list and makes
+  # two serial API calls per sled. Cheap today because deployments are single-rack
+  # (tens of sleds). If Oxcorder is ever pointed at a MULTI-RACK fleet, sled_list
+  # returns every sled across every rack and this becomes hundreds-to-thousands of
+  # serial calls. Before that day: scope it with an optional rack filter (re-add
+  # -r and filter sled_list by rack_id), and/or run the per-sled calls with
+  # bounded parallelism.
   # Per-sled disk and instance counts (per-sled endpoints; the fleet lists paginate).
   local pf="$TMP/persled.tsv"; : >"$pf"
   local sid dc ic
   while read -r sid; do
-    dc=$(timeout "$TIMEOUT" oxide api "/v1/system/hardware/sleds/${sid}/disks"     2>/dev/null | jq -r '.items|length' 2>/dev/null)
-    ic=$(timeout "$TIMEOUT" oxide api "/v1/system/hardware/sleds/${sid}/instances" 2>/dev/null | jq -r '.items|length' 2>/dev/null)
+    dc=$(ox oxide api "/v1/system/hardware/sleds/${sid}/disks"     2>/dev/null | jq -r '.items|length' 2>/dev/null)
+    ic=$(ox oxide api "/v1/system/hardware/sleds/${sid}/instances" 2>/dev/null | jq -r '.items|length' 2>/dev/null)
     printf '%s\t%s\t%s\n' "$sid" "${dc:-?}" "${ic:-?}" >>"$pf"
   done < <(jq -r '.items[].id' "$sl")
   local pj="$TMP/persled.json"
@@ -227,7 +253,7 @@ show_zones() {
   local out="$TMP/M-ZONES.out"        # reuse the validation query's output if present
   if [[ ! -s "$out" ]]; then
     out="$TMP/inv_zones.out"
-    if ! timeout "$TIMEOUT" oxide experimental system timeseries query \
+    if ! ox oxide experimental system timeseries query \
            --query "get sled_data_link:bytes_sent | filter timestamp > @now() - ${WINDOW}" \
            >"$out" 2>"$TMP/inv_zones.err"; then
       echo "  ${C_ERR}zone query failed:${C_R} $(head -1 "$TMP/inv_zones.err")"
@@ -267,12 +293,12 @@ show_storage() {
   echo
   echo "Storage per sled  ${C_DIM}(zfs_pool; EXT=U.2 data pools, INT=M.2 boot; USED/TOTAL are external pools; disk IO not available sled-wide — see spec)${C_R}"
   local a="$TMP/pool_alloc.out" t="$TMP/pool_total.out"
-  if ! timeout "$TIMEOUT" oxide experimental system timeseries query \
+  if ! ox oxide experimental system timeseries query \
          --query "get zfs_pool:bytes_allocated | filter timestamp > @now() - ${WINDOW}" \
          >"$a" 2>"$TMP/pool_a.err"; then
     echo "  ${C_ERR}zfs_pool query failed:${C_R} $(head -1 "$TMP/pool_a.err")"; return
   fi
-  timeout "$TIMEOUT" oxide experimental system timeseries query \
+  ox oxide experimental system timeseries query \
     --query "get zfs_pool:bytes_total | filter timestamp > @now() - ${WINDOW}" \
     >"$t" 2>/dev/null
   if [[ "$(jq -r '[.tables[].timeseries[]]|length' "$a" 2>/dev/null)" == "0" ]]; then
@@ -449,8 +475,10 @@ voltage_bad_count() {
 # ---------------------------------------------------------------------------
 SLED="" ; SERIAL=""
 if [[ $DRYRUN -eq 0 ]]; then
-  SLED="$(timeout "$TIMEOUT" oxide api /v1/system/hardware/sleds 2>/dev/null | jq -r '.items[0].id // empty')"
-  SERIAL="$(timeout "$TIMEOUT" oxide api /v1/system/hardware/sleds 2>/dev/null | jq -r '.items[0].baseboard.serial // empty')"
+  sleds_json="$(ox oxide api /v1/system/hardware/sleds 2>/dev/null)"
+  SLED="$(jq -r '.items[0].id // empty' <<<"$sleds_json")"
+  SERIAL="$(jq -r '.items[0].baseboard.serial // empty' <<<"$sleds_json")"
+  unset sleds_json
 fi
 
 if [[ "$MODE" == "full" ]]; then
