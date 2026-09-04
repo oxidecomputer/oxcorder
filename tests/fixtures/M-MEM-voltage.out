@@ -1,0 +1,10 @@
+{"tables":[{"timeseries":[
+ {"fields":{"chassis_serial":{"type":"string","value":"BRM0001"},"chassis_kind":{"type":"string","value":"sled"},"sensor":{"type":"string","value":"V12_DDR5_ABCDEF_A0"}},
+  "points":{"timestamps":["t"],"values":[{"values":{"type":"double","values":[12.0]},"metric_type":"gauge"}]}},
+ {"fields":{"chassis_serial":{"type":"string","value":"BRM0001"},"chassis_kind":{"type":"string","value":"sled"},"sensor":{"type":"string","value":"V12_DDR5_GHIJKL_A0"}},
+  "points":{"timestamps":["t0","t1"],"values":[{"values":{"type":"double","values":[0.02,0.0]},"metric_type":"gauge"}]}},
+ {"fields":{"chassis_serial":{"type":"string","value":"BRM0001"},"chassis_kind":{"type":"string","value":"sled"},"sensor":{"type":"string","value":"V12_MCIO_A0HP"}},
+  "points":{"timestamps":["t"],"values":[{"values":{"type":"double","values":[0.0]},"metric_type":"gauge"}]}},
+ {"fields":{"chassis_serial":{"type":"string","value":"BRM0002"},"chassis_kind":{"type":"string","value":"sled"},"sensor":{"type":"string","value":"VDDCR_CPU0_A0"}},
+  "points":{"timestamps":["t"],"values":[{"values":{"type":"double","values":[1.1]},"metric_type":"gauge"}]}}
+]}]}

@@ -1,0 +1,6 @@
+{"tables":[{"timeseries":[
+ {"fields":{"pool_id":{"type":"uuid","value":"p1"}},"points":{"timestamps":["t"],"values":[{"values":{"type":"integer","values":[3840000000000]},"metric_type":"gauge"}]}},
+ {"fields":{"pool_id":{"type":"uuid","value":"p2"}},"points":{"timestamps":["t"],"values":[{"values":{"type":"integer","values":[3840000000000]},"metric_type":"gauge"}]}},
+ {"fields":{"pool_id":{"type":"uuid","value":"m1"}},"points":{"timestamps":["t"],"values":[{"values":{"type":"integer","values":[400000000000]},"metric_type":"gauge"}]}},
+ {"fields":{"pool_id":{"type":"uuid","value":"p3"}},"points":{"timestamps":["t"],"values":[{"values":{"type":"integer","values":[3840000000000]},"metric_type":"gauge"}]}}
+]}]}

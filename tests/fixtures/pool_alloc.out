@@ -1,0 +1,10 @@
+{"tables":[{"timeseries":[
+ {"fields":{"sled_serial":{"type":"string","value":"BRM0001"},"pool_id":{"type":"uuid","value":"p1"},"pool_name":{"type":"string","value":"oxp_p1"}},
+  "points":{"timestamps":["t"],"values":[{"values":{"type":"integer","values":[1000000000000]},"metric_type":"gauge"}]}},
+ {"fields":{"sled_serial":{"type":"string","value":"BRM0001"},"pool_id":{"type":"uuid","value":"p2"},"pool_name":{"type":"string","value":"oxp_p2"}},
+  "points":{"timestamps":["t0","t1"],"values":[{"values":{"type":"integer","values":[500000000000,600000000000]},"metric_type":"gauge"}]}},
+ {"fields":{"sled_serial":{"type":"string","value":"BRM0001"},"pool_id":{"type":"uuid","value":"m1"},"pool_name":{"type":"string","value":"oxi_m1"}},
+  "points":{"timestamps":["t"],"values":[{"values":{"type":"integer","values":[10000000000]},"metric_type":"gauge"}]}},
+ {"fields":{"sled_serial":{"type":"string","value":"BRM0002"},"pool_id":{"type":"uuid","value":"p3"},"pool_name":{"type":"string","value":"oxp_p3"}},
+  "points":{"timestamps":["t"],"values":[{"values":{"type":"integer","values":[3600000000000]},"metric_type":"gauge"}]}}
+]}]}
