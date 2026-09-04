@@ -87,6 +87,38 @@ run-result, `classify_err`, and the timeout fallback) against fixtures under
 `oxide` on `PATH`. The harness is sourced by the tests via a `BASH_SOURCE`
 main-guard, so sourcing it defines the functions without starting a run.
 
+## Container
+
+A pinned, self-contained image runs both the tests and live scans — Alpine plus
+bash, jq, the `oxide` CLI (static musl build), and bats-core:
+
+```
+docker build -t oxcorder .
+```
+
+Tests (no rack or auth needed):
+
+```
+docker run --rm oxcorder test
+```
+
+Live scan with a `fleet.viewer` token:
+
+```
+docker run --rm \
+  -e OXIDE_HOST="https://<silo>.sys.<rack>.example.com" \
+  -e OXIDE_TOKEN="oxide-token-..." \
+  oxcorder -s
+```
+
+`run` (the default) takes any oxcorder flag (`-s`, `-c`, `-w 30m`); `test` runs
+the bats suite; `shell` drops you into bash. Pinned versions are build args —
+`ALPINE_VERSION`, `OXIDE_VERSION`, `BATS_VERSION` — e.g. to move the CLI:
+
+```
+docker build --build-arg OXIDE_VERSION=v0.19.0+... -t oxcorder .
+```
+
 ## Status
 
 Queries are validated against the omicron OxQL grammar and the nexus authz code with
