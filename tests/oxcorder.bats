@@ -32,8 +32,8 @@ with_fake_oxide() {
 @test "script is sourceable without executing a run" {
   run bash -c "source '${OXC_ROOT}/oxcorder.sh'; echo SOURCED_OK"
   [ "$status" -eq 0 ]
-  [ "${lines[-1]}" = "SOURCED_OK" ]
-  [[ ! "$output" =~ "long-range sensors" ]]
+  [[ "$output" =~ SOURCED_OK ]]                  # sourced cleanly (no negative index: bash 3.2 safe)
+  [[ ! "$output" =~ "long-range sensors" ]]      # main did not run (no banner)
 }
 
 # --- classify_err --------------------------------------------------------
