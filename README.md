@@ -1,7 +1,7 @@
-# Oxcorder: Like a tricorder, but for the rack.
+# Oxcorder: Like a tricorder, but for the rack
 
 Oxcorder reads an Oxide rack the way McCoy reads a readshirt:
-quickly, accurately, and without laying a hand on it. Unlike the 
+quickly, accurately, and without laying a hand on it. Unlike the
 redshirt, the rack tends to survive the episode.
 
 Oxcorder contains checks a customer can run over their own consumable surfaces:
@@ -9,15 +9,16 @@ the external API and oximeter timeseries (OxQL). The goal is to reduce
 technician-port (techport) usage on the rack by moving health checks onto structured,
 continuously-collected data.
 
-The inspiration for this is an internal tool that, as one of it's features, retrieves 
+The inspiration for this is an internal tool that, as one of it's features, retrieves
 a collection of health and inventory data from a fleet of Oxide racks. This is useful,
-but does require tech port access as written. However, nearly all of this data is 
-accessible to a rack operator with fleet level permissions (albeit indirectly in a few 
+but does require tech port access as written. However, nearly all of this data is
+accessible to a rack operator with fleet level permissions (albeit indirectly in a few
 cases).
 
-This is intended to be a reference to provide one view of how an operator can monitor
-a rack, not as a drop-in service for rack monitoring. 
-
+> [!NOTE]
+> This is intended as a reference; the process here (shell scripting and jq work) is brittle and can and will break in various ways. The main goal is to make the queries and api routes easy to read and understand.
+>
+> The correct way to do this - outside of pulling metrics into an existing system - is to utilize one of the Oxide SDKs to express this in rust, go, typescript, etc, using the techport-monitoring-spec document as a starting point.
 
 ## Contents
 
